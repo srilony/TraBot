@@ -5,7 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { CommerceStore, AppError } from './store.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'] };
+const FILES = {
+  '/': ['index.html', 'text/html; charset=utf-8'],
+  '/event-hub': ['index.html', 'text/html; charset=utf-8'],
+  '/simulator': ['index.html', 'text/html; charset=utf-8'],
+  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+};
 
 async function body(req) {
   let content = '';
@@ -30,18 +36,25 @@ export function createApp(store) {
     const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
     try {
       const url = new URL(req.url, 'http://local');
-      if (req.method === 'GET' && url.pathname === '/api/health') return json(200, { ok: true, mode: 'demo', database: 'sqlite', currency: 'EUR' });
+      if (req.method === 'GET' && url.pathname === '/api/health') return json(200, { ok: true, mode: 'demo', database: 'sqlite', currency: 'EUR', schemaVersion: 2 });
+      const filters = Object.fromEntries(url.searchParams);
+      if (req.method === 'GET' && url.pathname === '/api/catalog') return json(200, store.catalog());
+      if (req.method === 'GET' && url.pathname === '/api/subscriptions') return json(200, store.getSubscriptions());
+      if (req.method === 'GET' && url.pathname === '/api/hub/events') return json(200, store.hubEvents(filters));
+      if (req.method === 'GET' && url.pathname === '/api/source-records') return json(200, store.sourceRecords(filters));
       if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(200, store.dashboard(url.searchParams.get('brandId') || 'all'));
-      if (req.method === 'GET' && url.pathname === '/api/stream') {
+      if (req.method === 'GET' && ['/api/stream', '/api/hub/stream'].includes(url.pathname)) {
         const brandId = url.searchParams.get('brandId') || 'all';
-        store.dashboard(brandId); // Validate filter before opening a stream.
+        const isHub = url.pathname === '/api/hub/stream';
+        const snapshot = () => isHub ? store.hubEvents(filters) : store.dashboard(brandId);
+        snapshot(); // Validate filters before opening a stream.
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'keep-alive', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
         res.flushHeaders();
         const send = () => {
           if (res.destroyed) return;
           // Slow clients reconnect to a fresh authoritative snapshot rather than buffering indefinitely.
           if (res.writableLength > 1_000_000) { res.destroy(); return; }
-          res.write(`event: snapshot\ndata: ${JSON.stringify(store.dashboard(brandId))}\n\n`);
+          res.write(`event: ${isHub ? 'hub-snapshot' : 'snapshot'}\ndata: ${JSON.stringify(snapshot())}\n\n`);
         };
         const unsubscribe = store.subscribe(send);
         streams.add(res);
@@ -50,7 +63,7 @@ export function createApp(store) {
         send();
         return;
       }
-      if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
+      if (['POST', 'PUT'].includes(req.method) && url.pathname.startsWith('/api/')) {
         // Local demo only. Block cross-origin browser writes even though this is not an authenticated product.
         if (req.headers.origin) {
           let origin;
@@ -59,7 +72,10 @@ export function createApp(store) {
         }
         if (!(req.headers['content-type'] || '').startsWith('application/json')) throw new AppError('Use Content-Type: application/json.', 415);
         const input = await body(req);
-        if (url.pathname === '/api/events') return json(200, store.ingest(input));
+        if (req.method === 'PUT' && url.pathname === '/api/subscriptions') return json(200, store.setSubscriptions(input.subscriptions));
+        if (req.method !== 'POST') return json(404, { error: 'Not found.' });
+        if (['/api/events', '/api/hub/events'].includes(url.pathname)) return json(200, store.ingest(input));
+        if (url.pathname === '/api/simulator/preview') return json(200, store.simulatePreview(input));
         if (url.pathname === '/api/demo/reset') { store.resetDemo(); return json(200, { ok: true }); }
         const match = url.pathname.match(/^\/api\/demo\/(order|abandon|nudge|recover)$/);
         if (match) return json(200, store.simulate(match[1], input));

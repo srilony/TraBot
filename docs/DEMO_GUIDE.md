@@ -1,21 +1,24 @@
-# Three-minute investor demo
+# Investor walkthrough: three views, one event flow
 
-**Story:** Across brands, commerce signals become one operational view. Managers see outcomes and open opportunities, then coordinate a response.
+**Story:** Source systems publish changes to a shared hub. Commerce chooses the channels that matter, and its portfolio view updates automatically.
 
 ## Prepare
 
-From the repository run `npm ci --ignore-scripts`, `npm test`, and `npm start`. Open through your chosen local/hosted setup; the cloud onboarding interface has no public app preview. Reset the demo to restore the fictional baseline. Reset deletes all events in the active demo database. Keep the demo-data label visible. Optionally use a second browser window to show subscriptions updating together.
+Run `npm ci`, `npm test`, then `npm start`. Open the application through your local/hosted setup. Use three browser tabs: **Commerce hub**, **Event hub**, and **Event simulator**. The cloud onboarding interface itself has no public app preview.
+
+In commerce, save the default subscriptions: ERP orders on, e-commerce carts on, e-commerce orders off. For a clean presentation, reset the **disposable demo database** from the simulator; reset clears added CDC/source data and retains subscription settings. All brands and events are fictional.
 
 ## Present
 
-1. **Portfolio (30 seconds).** Show monthly gross order value and brand comparison. Explain that these are placed orders, not reconciled cash. Filter a brand, then return to all brands.
-2. **An order arrives (30 seconds).** Publish a €100 order in the simulator. The current-month metric, chart and event feed update without refresh, including in a second window.
-3. **Opportunity (30 seconds).** Publish a €75 abandoned cart. Open-cart value rises; booked order value does not. Explain that opportunity is not guaranteed revenue.
-4. **Action and outcome (45 seconds).** Record a mock nudge. No message is sent and no sale is generated. Separately simulate checkout for the same cart. Open opportunity falls and booked sales rise; the feed records the steps. Do not claim measured conversion lift.
-5. **Vision (30 seconds).** Connect this working flow to the pitch's wider inventory, service, finance and workflow ambition. Those are future capabilities, not implemented features.
+1. **A source publishes an order.** In the simulator choose ERP → Orders → Create, a brand and €100. Preview the event. Point to `op: c`, `before: null` and the new order in `after`. The preview changes no data. Publish it.
+2. **The hub receives it.** The event appears automatically in the event hub. Inspect source system, record ID, receipt time, event time and before/after JSON. The commerce tab's monthly booked order value increases by €100 without refresh.
+3. **Prove subscription routing.** Publish an e-commerce order worth €40 with a distinct ID. It appears in the hub but does not change commerce while that channel is off. Enable E-commerce / Orders in commerce and save. Retained history is included, so the €40 appears immediately. Disable it to remove its contribution; the hub still retains the event.
+4. **Show change data capture.** In the simulator choose ERP → Orders → Update and select the €100 order. Change its value to €150. Preview shows old/new images. Publish; the graph increases by €50, not €150. Choose Delete for the same order, preview and publish. Its current booked value disappears, but the hub retains create, update and delete records.
+5. **Show cart opportunity.** Create an e-commerce abandoned cart worth €75. Open-cart value increases by €75 while booked order value stays unchanged. Update its value or mark it converted to show changes in current opportunity. To demonstrate linked recovery, create an ERP order with that cart's ID; the subscribed order closes its opportunity and contributes order value once.
+6. **Show the durable picture.** Filter the hub by system/table/operation, inspect older pages, then reload a tab. Subscriptions and data survive reload and server restart.
 
-## Honest boundaries
+## Explain boundaries honestly
 
-Event ingestion, persistence, pub-sub, graph updates and filtering work. Brands, data, nudges and checkout are fictional/presenter-controlled. There is no live store, message delivery, authentication or independent durable broker. No public hosting deployment has been performed.
+The system performs real persistence, ingestion validation, in-process pub-sub, live browser subscriptions and source-filtered projections. CDC events and source systems are simulated; there is no real ERP/e-commerce database connector, no email delivery, no cloud-managed broker and no production authentication. Current order value is not payment-reconciled revenue. Cart value is opportunity, not a forecast. A linked purchase is not evidence that a nudge caused conversion.
 
-During server restart the dashboard shows reconnection and restores the current snapshot afterward. SQLite preserves state. Reload if needed; reset restores the presentation baseline. Without hosted access, run the same app on a local Node 24 machine and screen-share it.
+Simulator changes use current source images and reject stale previews with 409. Refresh/select the record and preview again if another tab changed it. Reset is shared and intentional. Changing subscriptions is also shared across demo windows and rebuilds from retained history.

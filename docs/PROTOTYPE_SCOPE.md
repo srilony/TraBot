@@ -1,73 +1,65 @@
 # Prototype assessment and scope
 
-Based on `Builders_Pitch_Sriram.docx` and the accompanying request.
+The supplied business pitch and requested scenarios are sufficient for an investor MVP. The application demonstrates a source change → shared event hub → selected subscriber → business graph flow. It demonstrates feasibility and interaction, not customer demand, a production connector or measured conversion lift.
 
-**Assessment: sufficient to build a focused investor demo with explicit assumptions.** The pitch defines the buyer, multi-brand context and event-driven approach; the request supplies two concrete scenarios. It does not define event schemas, metrics, abandonment timing, integrations or demo acceptance criteria. The prototype fills those gaps provisionally and demonstrates feasibility and interaction, not demand or conversion lift.
+## Implemented scope
 
-| Area | Provided | Working prototype decision |
-| --- | --- | --- |
-| Audience | Portfolio managers and leadership; groups and aggregators | One portfolio, three fictional brands, one shared view |
-| Main scenarios | Order events update monthly revenue; unchecked-out carts show potential | Implement both and a separate mock-nudge / simulated-checkout journey |
-| Wider vision | Inventory, fulfillment, service, finance, custom apps and workflows | Defer these to keep the first demo small |
-| Commerce source | Generic ecommerce publisher | Interactive simulator; no live store or credentials |
-| Revenue definition | Monthly gross revenue | Gross merchandise order value before discounts, excluding tax/shipping; booked demand, not cash or recognized revenue |
-| Cart abandonment | Unchecked-out cart event | Explicit simulator event; proposed future rule: 60 minutes of inactivity, subject to source capability |
-| Potential revenue | Value requiring a nudge | Current unconverted cart value, not a forecast or guaranteed recoverable revenue |
-| Nudge | Suggested response to an opportunity | Record a mock action; send no message; checkout is a separate simulation |
-| Investor success | MVP demonstration | Live graph update, filtering, event trace and repeatable reset |
+| View | Working behavior |
+| --- | --- |
+| Event hub | All accepted unique CDC changes, newest receipt first; absolute event and receipt timestamps; source system/table/brand/operation filters; paginated complete history; before/after and full-envelope inspection; live updates |
+| Event simulator | Choose ERP or e-commerce, supported table, brand, create/update/delete and record data; select current records for update/delete; preview without mutation; explicitly publish to the hub |
+| Commerce hub | Independently subscribe to ERP orders, e-commerce orders and e-commerce carts; persist settings; rebuild from retained history; update charts, portfolio, carts and consumed-event feed live |
 
-## Metrics and data
+These are views of one existing Node application in `srilony/TraBot`, not separate apps or repositories. Separating simulation from observation makes the publisher/hub/subscriber roles explicit.
 
-- All amounts use integer **EUR cents**. All event-month boundaries use **UTC**.
-- **Monthly gross order value:** sum of unique placed orders' gross merchandise value before discounts, excluding tax/shipping, by event time. No payment, return or cancellation lifecycle is modeled; this is not net sales or reconciled revenue.
-- **Open-cart opportunity:** current value of distinct abandoned carts not linked to a checkout. This is a stock across time, not a monthly flow. Never add it to booked order value.
-- **Recovered order value:** orders linked to carts abandoned before checkout. This is descriptive linkage, not evidence that a nudge caused conversion. A cart may check out without a nudge.
-- Six-month totals include the current partial month. A complete prior month is not a like-for-like comparison.
-- Fictional brands and simulated events remain labeled. Reset deletes events in the active demo database and restores seeded history.
+## Assumptions and metric rules
 
-## Bare minimum architecture
+- Systems and brands are fictional. ERP supports orders; the e-commerce source supports orders and carts. There are no real connections or credentials.
+- Default subscription: ERP/orders and e-commerce/carts enabled; e-commerce/orders disabled. Every combination, including no channels, is supported. Settings are shared demo-workspace state, not per-user security permissions.
+- Enabling a channel includes retained history immediately. Disabling one removes its current contribution without deleting hub data. It does not create an independent durable broker consumer or offset.
+- All amounts are positive integer EUR cents; UTC calendar months are used.
+- Monthly **gross order value** is the latest merchandise value, before discounts and excluding tax/shipping, of currently placed orders from subscribed sources. Updates replace values; cancelled or deleted records are excluded. Simulator corrections preserve the original `placedAt` month. It is not cash collected, recognized revenue or a historical accounting ledger.
+- **Open-cart opportunity** is the current value of distinct subscribed abandoned carts, excluding explicit converted carts and carts linked to subscribed placed orders. It is a stock across time, never added to order value or presented as guaranteed future revenue.
+- **Recovered order value** describes orders linked to previously abandoned carts; it does not establish that a nudge caused a purchase.
+- A cart is explicitly set to abandoned by a simulated source change. Real inactivity detection, timing and customer messaging remain unimplemented. The earlier proposed 60-minute rule is a future source-integration decision.
+- Same brand/table/record IDs across subscribed sources resolve to the latest event timestamp, then receipt sequence, including tombstones. Source identifiers must be reconciled deliberately in a real integration; this demo assumes shared IDs mean the same record.
 
-1. **One Node 24 process:** event ingestion, transactional projection, in-process pub-sub hub, Server-Sent Events (SSE), simulator and static frontend.
-2. **One SQLite file:** accepted event journal plus order/cart projections; persistent across server restarts.
-3. **One browser dashboard:** charts, brand filter/comparison, actionable carts, event feed and simulator.
+## Architecture
 
 ```mermaid
 flowchart LR
-  A[Simulator or event publisher] -->|POST event| B[Validate and deduplicate]
-  B --> C[(SQLite journal + projections)]
-  C -->|After commit| D[In-process event hub]
-  D --> E[Dashboard subscriber]
-  E -->|SSE snapshot| F[Browser charts and event feed]
+  A[Separate event simulator view] -->|Preview then publish CDC| B[Event hub ingestion]
+  B --> C[(SQLite journal and source state)]
+  C --> D[In-process pub-sub hub]
+  D --> E[Live event hub view]
+  D --> F[Commerce source/table subscriptions]
+  F --> G[Charts and portfolio metrics]
 ```
 
-The backend publishes only after storage commits. Browser subscribers receive authoritative snapshots instead of incrementing metrics locally. Reconnect recovers missed changes using the current snapshot. Persisted state survives a process restart; processes and live subscriptions must restart after environment publication.
+One Node 24 process and one SQLite file serve all views. The journal retains accepted changes; per-source current records and saved subscription rules drive commerce projections. Writes commit before notifications. Browser SSE subscribers receive authoritative snapshots, so reconnect/reload recovers current state without reapplying deltas twice. Server processes and connections must restart after cloud environment publication.
 
-This demonstrates real pub-sub **within one process**. It is not an Azure Event Hubs or Kafka deployment. An independent durable broker, partitioning, retries, multi-process fan-out, user authentication and production delivery guarantees are deferred.
+Version-one databases migrate once into CDC. Original journal/projection tables are retained, while new logic uses CDC tables. Original order events map to ERP/orders and cart events to e-commerce/carts; these source assignments are inferred and visibly marked `legacy-migration`. They are not historical proof of real system-of-record capture.
 
-## Event contract
+## CDC and integrity
 
-Envelope: `eventId`, `type`, `occurredAt` (ISO timestamp with timezone), `brandId`, `source`, `payload`.
+Envelopes contain event ID, event timestamp, system/table, brand, operation and before/after images. The hub adds receipt time and sequence. Create has null before; update has both; delete has null after. This is a vendor-neutral CDC-style format, not full Debezium or another connector's wire protocol.
 
-| Type | Payload | Effect |
-| --- | --- | --- |
-| `order.placed` | `orderId`, optional `cartId`, `amountCents`, `currency: "EUR"` | Add one order to its month; close linked cart |
-| `cart.abandoned` | `cartId`, `amountCents`, `currency: "EUR"` | Add one unconverted cart to opportunity |
-| `cart.nudge_requested` | `cartId` | Record mock action; no sale or external send |
+Duplicate deliveries do not create additional accepted rows or inflate totals. Record changes require matching current before images. Invalid/stale changes fail visibly; a rejected request is not an accepted journal entry. The event hub shows the complete accepted history with pagination rather than the commerce feed's short recent list.
 
-Event IDs deduplicate deliveries; reuse with different content conflicts. Stable brand/order and brand/cart IDs also prevent duplicate business counts. A late abandonment cannot reopen a converted cart. Cart-value edits are unsupported in this MVP. Invalid amounts, unknown brands and mixed currencies are rejected.
+Reset is an explicit simulator action that deletes active CDC/source data and restores fictional history. Subscription choices persist. No reset happens on navigation or restart.
 
-## Acceptance criteria
+## Validation goals
 
-- A €100 order changes exactly its brand and month by €100 in two subscribed browser windows, without refresh.
-- Re-delivering an event or order cannot inflate the graph.
-- A €75 abandoned cart adds €75 opportunity. A mock nudge adds no sales.
-- Its separately simulated checkout removes €75 opportunity and adds €75 order value once.
-- Late abandonment cannot reopen a converted cart.
-- Reconnect/reload restores current state; restart preserves SQLite data.
-- Filtering, visible failures, responsive layout and reset work.
+- An ERP order updates the matching month/brand without refresh in multiple windows.
+- An unsubscribed e-commerce order still appears in the hub and only affects commerce after that channel is enabled.
+- Before/after updates replace values; deletes retract current metrics and retain all journal entries.
+- Subscription changes, reload, process restart and legacy migration preserve intended data/state.
+- Source carts update independently, with no revenue invented from opportunity or conversion status alone.
+- Duplicate/stale changes cannot inflate or corrupt metrics; previews never mutate data.
+- Filters, full-history pagination, inspection, mobile layout and visible errors work.
 
-## Business evidence and remaining decisions
+## Deferred business and platform scope
 
-The pitch's market/returns statistics were not independently verified in this implementation task and are not presented as proof in the app. Custom applications plus shared metrics/workflows are proposed differentiation, not a demonstrated moat. The demo does not validate willingness to pay. A useful next step is to show the flow to a portfolio operator, compare it with a real exception they handled, and seek a concrete pilot commitment if it changes their decision.
+Inventory, fulfillment, service/feedback, finance reconciliation, configurable workflow/custom-app builders, live connectors, identity/consent, authentication and multi-currency handling are outside this version. An independent durable broker, retry/dead-letter queues, partitions, consumer checkpoints and multi-process delivery guarantees are also deferred.
 
-The first clarification is simulator versus an existing store. The simulator is the default until specified otherwise. Before a live pilot, agree on provider, metric definitions, payment/returns lifecycle, abandonment threshold, currency policy, customer identity/consent for nudges, hosting and access control. Those decisions do not block this fictional-data demo.
+The pitch's external market/returns statistics were not independently verified for this implementation and are not used as proof in the app. The proposed differentiation and willingness to pay remain hypotheses. A useful next validation is to show this flow to a portfolio operator, compare it with a real exception they handled, and seek a concrete pilot commitment if it changes their decision.

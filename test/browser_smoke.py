@@ -1,155 +1,207 @@
-"""Optional end-to-end demo check. Requires Python Playwright and Chromium.
+"""Optional three-view browser smoke check (Python Playwright + Chromium).
 
-The app must already be running. This test resets the shared demo dataset before
-and after its scenarios, so run it only against a disposable demonstration.
+Run only against a disposable demo database: this script changes subscriptions,
+creates/updates/deletes source records, and resets demo history before and after.
 
-DEMO_BASE_URL defaults to http://127.0.0.1:3000.
-DEMO_ARTIFACT_DIR defaults to /tmp/commerce-hub-browser.
-CHROMIUM_PATH defaults to /usr/bin/chromium.
+Example: DEMO_BASE_URL=http://127.0.0.1:3001 python3 test/browser_smoke.py
+The server must already be running. CHROMIUM_PATH defaults to /usr/bin/chromium;
+DEMO_ARTIFACT_DIR defaults to /tmp/commerce-cdc-browser.
 """
-
 import json
 import os
-import re
 from decimal import Decimal
 from pathlib import Path
-
 from playwright.sync_api import expect, sync_playwright
 
-
-BASE_URL = os.environ.get("DEMO_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
-ARTIFACTS = Path(os.environ.get("DEMO_ARTIFACT_DIR", "/tmp/commerce-hub-browser"))
-
-
-def cents(text):
-    return int(Decimal(re.sub(r"[^0-9.-]", "", text)) * 100)
-
+BASE = os.environ.get('DEMO_BASE_URL', 'http://127.0.0.1:3000').rstrip('/')
+ARTIFACTS = Path(os.environ.get('DEMO_ARTIFACT_DIR', '/tmp/commerce-cdc-browser'))
+DEFAULTS = [
+    {'systemId': 'erp', 'table': 'orders', 'enabled': True},
+    {'systemId': 'ecommerce', 'table': 'orders', 'enabled': False},
+    {'systemId': 'ecommerce', 'table': 'carts', 'enabled': True},
+]
 
 def euro(value):
-    return f"€{Decimal(value) / 100:,.2f}"
-
+    return f'€{Decimal(value) / 100:,.2f}'
 
 def main():
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            executable_path=os.environ.get("CHROMIUM_PATH", "/usr/bin/chromium"),
-            headless=True,
-            args=["--no-sandbox"],
-        )
-        context = browser.new_context(viewport={"width": 1440, "height": 1100})
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=os.environ.get('CHROMIUM_PATH', '/usr/bin/chromium'), headless=True, args=['--no-sandbox'])
+        context = browser.new_context(viewport={'width': 1440, 'height': 1050})
         context.set_default_timeout(10000)
+        commerce, hub, simulator = [context.new_page() for _ in range(3)]
         errors = []
-        page = context.new_page()
-        second = context.new_page()
-        for tab in (page, second):
-            tab.on("pageerror", lambda error: errors.append(str(error)))
-            tab.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+        for page in [commerce, hub, simulator]:
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.on('console', lambda message: errors.append(message.text) if message.type == 'error' else None)
 
-        def reset_api():
-            response = context.request.post(f"{BASE_URL}/api/demo/reset", data={})
-            assert response.ok, f"Reset failed: {response.status}"
+        def get(path):
+            response = context.request.get(BASE + path)
+            assert response.ok, response.text()
+            return response.json()
 
-        def loaded(tab):
-            expect(tab.locator("#totalEvents")).not_to_have_text("—")
-            expect(tab.locator("#streamStatus")).to_have_text("Event hub connected")
+        def write(path, data, method='post'):
+            response = getattr(context.request, method)(BASE + path, data=data)
+            assert response.ok, response.text()
+            return response.json()
+
+        def loaded(page):
+            expect(page.locator('#streamStatus')).to_have_text('Event hub connected')
+            expect(page.locator('#errorBanner')).to_be_hidden()
+
+        def prepare(system, table, op='c', record_id='', amount='100.00', status=None, cart_id=''):
+            simulator.locator('#simOp').select_option('c')
+            simulator.locator('#simSystem').select_option(system)
+            simulator.locator('#simTable').select_option(table)
+            simulator.locator('#simBrand').select_option('northstar')
+            if op == 'c':
+                simulator.locator('#simRecordId').fill(record_id)
+            else:
+                simulator.locator('#simOp').select_option(op)
+                expect(simulator.locator(f'#simExisting option[value="{record_id}"]')).to_have_count(1)
+                simulator.locator('#simExisting').select_option(record_id)
+            if op != 'd':
+                simulator.locator('#simAmount').fill(amount)
+                simulator.locator('#simStatus').select_option(status or ('placed' if table == 'orders' else 'abandoned'))
+                if table == 'orders':
+                    simulator.locator('#simCartId').fill(cart_id)
+            expect(simulator.locator('#publishEvent')).to_be_disabled()
+            simulator.locator('#previewEvent').click()
+            expect(simulator.locator('#publishEvent')).to_be_enabled()
+            return json.loads(simulator.locator('#eventPreview').inner_text())
+
+        def publish():
+            with simulator.expect_response(lambda response: response.url.endswith('/api/hub/events') and response.request.method == 'POST') as received:
+                simulator.locator('#publishEvent').click()
+            response = received.value
+            assert response.ok, response.text()
+            result = response.json()
+            expect(simulator.locator('#publishStatus')).to_contain_text('Published.')
+            expect(simulator.locator('#publishEvent')).to_be_disabled()
+            expect(simulator.locator('#previewEvent')).to_be_enabled()
+            return result['event']
+
+        def inspect(event, before, after):
+            hub.locator(f'[data-event-id="{event["eventId"]}"]').click()
+            expect(hub.locator('#eventDialog')).to_be_visible()
+            assert json.loads(hub.locator('#eventBefore').inner_text()) == before
+            assert json.loads(hub.locator('#eventAfter').inner_text()) == after
+            expect(hub.locator('#eventMetadata')).to_contain_text(event['source']['name'])
+            hub.locator('#closeEventDialog').click()
 
         try:
-            reset_api()
-            for tab in (page, second):
-                tab.goto(BASE_URL, wait_until="domcontentloaded")
-                loaded(tab)
-            assert page.locator(".metric-card").count() == 4
-            print("PASS: dashboard loads with a connected event subscription")
+            write('/api/subscriptions', {'subscriptions': DEFAULTS}, method='put')
+            write('/api/demo/reset', {})
+            for page, path in [(commerce, '/'), (hub, '/event-hub'), (simulator, '/simulator')]:
+                page.goto(BASE + path, wait_until='domcontentloaded')
+                loaded(page)
+            baseline = get('/api/dashboard')
+            month = baseline['summary']['currentMonthValueCents']
+            opportunity = baseline['summary']['openCartValueCents']
+            total = get('/api/hub/events')['total']
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month))
+            assert commerce.locator('#commerceView #simulatorForm').count() == 0
+            assert commerce.locator('#commerceView [data-action="recover"]').count() == 0
+            print('PASS: three separate connected views; commerce has no embedded event simulator')
 
-            baseline = cents(page.locator("#monthRevenue").inner_text())
-            second_baseline = second.locator("#monthRevenue").inner_text()
-            order_button = page.get_by_role("button", name="Publish order")
-            page.locator("#simAmount").fill("123.45")
-            order_button.click()
-            expect(page.locator("#toast")).to_have_text("Order event published. Booked sales updated across the hub.")
-            expect(second.locator("#monthRevenue")).not_to_have_text(second_baseline)
-            assert cents(page.locator("#monthRevenue").inner_text()) == baseline + 12345
-            assert cents(second.locator("#monthRevenue").inner_text()) == baseline + 12345
-            expect(order_button).to_be_enabled()
-            print("PASS: €123.45 order updates both browser subscriptions exactly once")
+            preview = prepare('ecommerce', 'orders', record_id='SMOKE-ECOM-ORDER', amount='123.45')
+            assert preview['before'] is None and preview['after']['amountCents'] == 12345
+            assert get('/api/hub/events')['total'] == total, 'Preview persisted an event'
+            ecom_event = publish()
+            expect(hub.locator('#hubTotal')).to_have_text(str(total + 1))
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month))
+            inspect(ecom_event, None, ecom_event['after'])
+            print('PASS: preview is side-effect free; unselected e-commerce orders reach hub but not commerce')
 
-            # One-cent events must remain observable in the primary metrics.
-            page.locator("#simAmount").fill("0.01")
-            order_button.click()
-            expect(page.locator("#monthRevenue")).to_have_text(euro(baseline + 12346))
-            expect(order_button).to_be_enabled()
-            expect(second.locator("#monthRevenue")).to_have_text(euro(baseline + 12346))
-            assert cents(page.locator("#monthRevenue").inner_text()) == baseline + 12346
-            print("PASS: a one-cent order remains visible in portfolio metrics")
+            commerce.locator('input[value="ecommerce.orders"]').check()
+            commerce.locator('#saveSubscriptions').click()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month + 12345))
+            commerce.reload(wait_until='domcontentloaded'); loaded(commerce)
+            expect(commerce.locator('input[value="ecommerce.orders"]')).to_be_checked()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month + 12345))
+            commerce.locator('input[value="ecommerce.orders"]').uncheck()
+            commerce.locator('#saveSubscriptions').click()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month))
+            print('PASS: saved source/data subscriptions include retained history and survive reload')
 
-            page.locator("#simAmount").fill("87.65")
-            original_cart_count = int(page.locator("#cartsCount").inner_text())
-            original_opportunity = cents(page.locator("#cartValue").inner_text())
-            original_recovered = cents(page.locator("#recoveredValue").inner_text())
-            abandon_button = page.get_by_role("button", name="Abandon a cart")
-            with page.expect_response(lambda response: response.url.endswith("/api/demo/abandon")) as published:
-                abandon_button.click()
-            cart_id = published.value.json()["event"]["payload"]["cartId"]
-            new_cart = page.locator(".cart-item").filter(has=page.locator(f'[data-cart="{cart_id}"]'))
-            expect(page.locator("#cartsCount")).to_have_text(str(original_cart_count + 1))
-            expect(abandon_button).to_be_enabled()
-            assert cents(page.locator("#cartValue").inner_text()) == original_opportunity + 8765
-            new_cart.get_by_role("button", name="Record nudge", exact=False).click()
-            expect(page.locator("#toast")).to_have_text("Nudge recorded in the hub. No message was sent.")
-            expect(new_cart.locator(".nudge-tag")).to_be_visible()
-            assert cents(page.locator("#cartValue").inner_text()) == original_opportunity + 8765
-            new_cart.get_by_role("button", name="Simulate checkout", exact=False).click()
-            expect(page.locator("#cartsCount")).to_have_text(str(original_cart_count))
-            expect(page.locator("#toast")).to_have_text("Checkout simulated. Cart value moved into booked sales.")
-            assert cents(page.locator("#cartValue").inner_text()) == original_opportunity
-            assert cents(page.locator("#recoveredValue").inner_text()) == original_recovered + 8765
-            assert cents(page.locator("#monthRevenue").inner_text()) == baseline + 12346 + 8765
-            print("PASS: cart → recorded nudge → linked checkout updates opportunity and booked sales")
+            prepare('erp', 'orders', record_id='SMOKE-ERP-ORDER', amount='100.00', cart_id='SMOKE-LINK')
+            publish()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month + 10000))
+            prepare('erp', 'orders', op='u', record_id='SMOKE-ERP-ORDER', amount='125.00')
+            updated = publish()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month + 12500))
+            inspect(updated, updated['before'], updated['after'])
+            assert updated['before']['amountCents'] == 10000 and updated['after']['amountCents'] == 12500
+            assert updated['before']['cartId'] == 'SMOKE-LINK' and 'cartId' not in updated['after'], 'Clearing a linked cart was not reflected in CDC'
+            prepare('erp', 'orders', op='d', record_id='SMOKE-ERP-ORDER')
+            deleted = publish()
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month))
+            inspect(deleted, deleted['before'], None)
+            print('PASS: subscribed ERP create/update/delete updates the monthly value and preserves CDC images')
 
-            page.locator("#brandFilter").select_option("atelier")
-            expect(page.locator("#brandTable tr")).to_have_count(1)
-            expect(page.locator("#brandTable")).to_contain_text("Atelier")
-            expect(page.locator("#simBrand")).to_have_value("atelier")
-            print("PASS: brand filter updates the portfolio and simulator selection")
+            prepare('ecommerce', 'carts', record_id='SMOKE-CART', amount='75.00')
+            publish()
+            expect(commerce.locator('#cartValue')).to_have_text(euro(opportunity + 7500))
+            prepare('ecommerce', 'carts', op='u', record_id='SMOKE-CART', amount='100.00')
+            publish()
+            expect(commerce.locator('#cartValue')).to_have_text(euro(opportunity + 10000))
+            prepare('ecommerce', 'carts', op='d', record_id='SMOKE-CART')
+            deleted_cart = publish()
+            expect(commerce.locator('#cartValue')).to_have_text(euro(opportunity))
+            inspect(deleted_cart, deleted_cart['before'], None)
+            print('PASS: subscribed e-commerce cart create/update/delete changes opportunity without inflating sales')
 
-            page.locator("#brandFilter").select_option("all")
-            expect(page.locator("#brandTable tr")).to_have_count(3)
-            before_reload = page.locator("#monthRevenue").inner_text()
-            second.reload(wait_until="domcontentloaded")
-            loaded(second)
-            expect(second.locator("#monthRevenue")).to_have_text(before_reload)
-            print("PASS: reload reconnects with authoritative persisted state")
+            hub.locator('#hubSystem').select_option('erp')
+            hub.locator('#hubTable').select_option('orders')
+            hub.locator('#hubOp').select_option('u')
+            hub.locator('#hubBrand').select_option('northstar')
+            expect(hub.locator('#hubTotal')).to_have_text('1')
+            expect(hub.locator('#hubRows')).to_contain_text('SMOKE-ERP-ORDER')
+            hub.locator('#clearHubFilters').click()
+            expect(hub.locator('#hubOlder')).to_be_enabled()
+            hub.locator('#hubOlder').click()
+            expect(hub.locator('#hubPageInfo')).to_contain_text('26–50')
+            expect(hub.locator('#hubNewer')).to_be_enabled()
+            hub.locator('#hubNewer').click()
+            expect(hub.locator('#hubPageInfo')).to_contain_text('1–25')
+            print('PASS: journal filters and pagination expose all retained events, including older history')
 
-            page.once("dialog", lambda dialog: dialog.accept())
-            page.locator("#resetDemo").click()
-            expect(page.locator("#toast")).to_have_text("Demo restored. Your portfolio is ready for a new story.")
-            expect(page.locator("#recoveredValue")).to_have_text("€0.00")
-            expect(second.locator("#monthRevenue")).to_have_text(page.locator("#monthRevenue").inner_text())
-            print("PASS: confirmed reset restores the shared demo baseline")
+            for checkbox in commerce.locator('#subscriptionChoices input').all():
+                checkbox.uncheck()
+            commerce.locator('#saveSubscriptions').click()
+            expect(commerce.locator('#monthRevenue')).to_have_text('€0.00')
+            expect(commerce.locator('#cartValue')).to_have_text('€0.00')
+            expect(commerce.locator('#eventList')).to_contain_text('No events match')
+            assert get('/api/hub/events')['total'] > total
+            print('PASS: zero subscriptions empties commerce while the event hub retains every accepted change')
 
-            # Neutral screenshots without transient notifications or edited controls.
-            page.locator("#simAmount").fill("149.00")
-            page.locator("#simBrand").select_option("northstar")
-            expect(page.locator("#toast")).to_be_hidden(timeout=6500)
-            page.evaluate("scrollTo(0, 0)")
-            page.screenshot(path=str(ARTIFACTS / "desktop.png"), full_page=True)
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Desktop has horizontal overflow"
-            page.set_viewport_size({"width": 390, "height": 844})
-            page.wait_for_timeout(180)  # Responsive SVG redraw is deliberately debounced.
-            page.screenshot(path=str(ARTIFACTS / "mobile.png"), full_page=True)
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Mobile has horizontal overflow"
-            page.set_viewport_size({"width": 320, "height": 740})
-            page.wait_for_timeout(180)
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "320px viewport has horizontal overflow"
-            assert not errors, "Browser errors: " + json.dumps(errors)
-            print("PASS: responsive 1440px, 390px, and 320px layouts; no browser script/console errors")
-            print(f"Screenshots: {ARTIFACTS / 'desktop.png'} and {ARTIFACTS / 'mobile.png'}")
+            # Restore a presentation baseline before screenshots.
+            write('/api/subscriptions', {'subscriptions': DEFAULTS}, method='put')
+            write('/api/demo/reset', {})
+            expect(commerce.locator('#monthRevenue')).to_have_text(euro(month))
+            hub.locator('#clearHubFilters').click()
+            prepare('ecommerce', 'carts', record_id='PREVIEW-CART', amount='75.00')
+            for page, name in [(commerce, 'commerce'), (hub, 'event-hub'), (simulator, 'simulator')]:
+                expect(page.locator('#toast')).to_be_hidden(timeout=6500)
+                page.locator('h1').click()
+                page.evaluate('scrollTo(0,0)')
+                page.screenshot(path=str(ARTIFACTS / f'{name}-desktop.png'), full_page=True)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'{name} desktop overflow'
+                page.set_viewport_size({'width': 390, 'height': 844})
+                page.wait_for_timeout(180)
+                page.screenshot(path=str(ARTIFACTS / f'{name}-mobile.png'), full_page=True)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'{name} 390px overflow'
+                page.set_viewport_size({'width': 320, 'height': 740})
+                page.wait_for_timeout(180)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'{name} 320px overflow'
+            assert not errors, json.dumps(errors)
+            print('PASS: all three views responsive at 1440/390/320px; no browser or console errors')
+            print(f'Screenshots: {ARTIFACTS}')
         finally:
-            reset_api()
-            context.close()
-            browser.close()
+            write('/api/subscriptions', {'subscriptions': DEFAULTS}, method='put')
+            write('/api/demo/reset', {})
+            context.close(); browser.close()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
