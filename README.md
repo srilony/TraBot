@@ -1,6 +1,6 @@
 # Commerce Operations Hub
 
-An investor prototype for multi-brand ecommerce observability. Publish an order or abandoned-cart event, watch the subscribed dashboard update, record a mock nudge, and separately simulate checkout. All demo companies and commerce data are fictional.
+A prototype for multi-brand ecommerce observability. Publish an order or abandoned-cart event, watch the subscribed dashboard update, record a mock nudge, and separately simulate checkout. All demo companies and commerce data are fictional.
 
 Read the [completeness assessment and scope](docs/PROTOTYPE_SCOPE.md) and [three-minute demo guide](docs/DEMO_GUIDE.md).
 
