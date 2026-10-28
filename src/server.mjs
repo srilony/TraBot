@@ -3,12 +3,17 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CommerceStore, AppError } from './store.mjs';
+import { WorkflowEngine } from './workflows.mjs';
+import { createWorkflowIO } from './workflow-io.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/event-hub': ['index.html', 'text/html; charset=utf-8'],
   '/simulator': ['index.html', 'text/html; charset=utf-8'],
+  '/workflows': ['workflows.html', 'text/html; charset=utf-8'],
+  '/workflows.js': ['workflows.js', 'text/javascript; charset=utf-8'],
+  '/workflows.css': ['workflows.css', 'text/css; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
 };
@@ -17,7 +22,7 @@ async function body(req) {
   let content = '';
   for await (const chunk of req) {
     content += chunk;
-    if (Buffer.byteLength(content) > 16_384) throw new AppError('Request body is too large.', 413);
+    if (Buffer.byteLength(content) > 262_144) throw new AppError('Request body is too large.', 413);
   }
   try {
     const result = JSON.parse(content || '{}');
@@ -28,6 +33,7 @@ async function body(req) {
 
 export function createApp(store) {
   const streams = new Set();
+  let workflowIO, workflows;
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
@@ -38,6 +44,18 @@ export function createApp(store) {
       const url = new URL(req.url, 'http://local');
       if (req.method === 'GET' && url.pathname === '/api/health') return json(200, { ok: true, mode: 'demo', database: 'sqlite', currency: 'EUR', schemaVersion: 2 });
       const filters = Object.fromEntries(url.searchParams);
+      if (req.method === 'GET' && url.pathname === '/api/workflows/catalog') return json(200, workflows.catalog());
+      if (req.method === 'GET' && url.pathname === '/api/workflows') return json(200, workflows.list());
+      if (req.method === 'GET' && url.pathname === '/api/workflows/runs') return json(200, workflows.runs(filters.workflowId));
+      if (req.method === 'GET' && url.pathname === '/api/workflows/outbox') return json(200, { messages: workflowIO.outbox() });
+      if (req.method === 'GET' && url.pathname === '/api/workflows/capabilities') return json(200, workflowIO.capabilities());
+      const workflowRoute = url.pathname.match(/^\/api\/workflows\/([a-zA-Z0-9-]+)(?:\/(runs|test))?$/);
+      if (req.method === 'GET' && workflowRoute) return json(200, workflowRoute[2] === 'runs' ? workflows.runs(workflowRoute[1]) : { workflow: workflows.get(workflowRoute[1]) });
+      if (req.method === 'GET' && url.pathname === '/api/workflow-demo/reference') {
+        const brandId = filters.brandId || 'northstar';
+        if (!store.catalog().brands.some(b => b.id === brandId)) throw new AppError('Unknown brandId.');
+        return json(200, { brandId, limitCents: 15000, teamEmail: 'operations@example.invalid', currency: 'EUR', source: 'Demo HTTP reference' });
+      }
       if (req.method === 'GET' && url.pathname === '/api/catalog') return json(200, store.catalog());
       if (req.method === 'GET' && url.pathname === '/api/subscriptions') return json(200, store.getSubscriptions());
       if (req.method === 'GET' && url.pathname === '/api/hub/events') return json(200, store.hubEvents(filters));
@@ -63,15 +81,19 @@ export function createApp(store) {
         send();
         return;
       }
-      if (['POST', 'PUT'].includes(req.method) && url.pathname.startsWith('/api/')) {
+      if (['POST', 'PUT', 'DELETE'].includes(req.method) && url.pathname.startsWith('/api/')) {
         // Local demo only. Block cross-origin browser writes even though this is not an authenticated product.
         if (req.headers.origin) {
           let origin;
           try { origin = new URL(req.headers.origin); } catch { throw new AppError('Invalid request origin.', 403); }
           if (origin.host !== req.headers.host) throw new AppError('Cross-origin writes are not supported.', 403);
         }
+        if (req.method === 'DELETE' && workflowRoute && !workflowRoute[2]) return json(200, workflows.remove(workflowRoute[1]));
         if (!(req.headers['content-type'] || '').startsWith('application/json')) throw new AppError('Use Content-Type: application/json.', 415);
         const input = await body(req);
+        if (req.method === 'POST' && url.pathname === '/api/workflows') return json(201, { workflow: workflows.save(input) });
+        if (req.method === 'PUT' && workflowRoute && !workflowRoute[2]) return json(200, { workflow: workflows.save(input, workflowRoute[1]) });
+        if (req.method === 'POST' && workflowRoute?.[2] === 'test') return json(200, { run: await workflows.test(workflowRoute[1], input) });
         if (req.method === 'PUT' && url.pathname === '/api/subscriptions') return json(200, store.setSubscriptions(input.subscriptions));
         if (req.method !== 'POST') return json(404, { error: 'Not found.' });
         if (['/api/events', '/api/hub/events'].includes(url.pathname)) return json(200, store.ingest(input));
@@ -89,13 +111,24 @@ export function createApp(store) {
     } catch (error) {
       if (res.headersSent) { res.destroy(); return; }
       if (!(error instanceof AppError)) console.error('Request failed:', error.message);
-      json(error.status ?? 500, { error: error instanceof AppError ? error.message : 'The server could not complete this request.' });
+      json(error.status ?? 500, { error: error instanceof AppError ? error.message : 'The server could not complete this request.', ...(error.details ? { details: error.details } : {}) });
     }
   });
   server.requestTimeout = 30_000;
+  workflowIO = createWorkflowIO({ db: store.db, getOrigin: () => {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new AppError('The HTTP server is not ready.');
+    const host = address.family === 'IPv6' ? `[${address.address === '::' ? '::1' : address.address}]`
+      : address.address === '0.0.0.0' ? '127.0.0.1' : address.address;
+    return `http://${host}:${address.port}`;
+  } });
+  workflows = new WorkflowEngine(store, { io: workflowIO });
+  server.once('listening', () => workflows.start());
   return {
     server,
+    workflows,
     async close() {
+      await workflows.close();
       for (const stream of streams) stream.end();
       server.closeAllConnections();
       await new Promise((done, reject) => server.close(error => error ? reject(error) : done()));

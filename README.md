@@ -1,10 +1,11 @@
 # Commerce Operations Hub
 
-A prototype with three separate views in one application and repository:
+A prototype with four connected features in one application and repository:
 
 - **Commerce hub** (`/`): live charts and portfolio metrics from the source/table channels you subscribe to.
 - **Event hub** (`/event-hub`): the complete accepted CDC event journal, with source system, receipt/event timestamps, filters, pagination, and before/after inspection.
 - **Event simulator** (`/simulator`): select a system of record, table, brand and record change; preview the CDC envelope, then publish it to the hub.
+- **Workflow automation** (`/workflows`): drag and connect trigger, condition, HTTP Get and email blocks; save flows, test them, inspect runs and enable event/schedule automation.
 
 The included ERP and e-commerce systems, brands and source data are fictional. CDC messages simulate database changes; no real database connector or commerce store is connected.
 
@@ -32,7 +33,7 @@ Reset is available **only in the simulator**, with confirmation. It deletes the 
 3. In **Terminal → New Terminal**, run `npm ci`, `npm test` and `npm start`.
 4. Open the local application on port 3000. Keep the terminal running; press Ctrl+C to stop.
 
-You can also choose **Terminal → Run Task → Start commerce demo**. Use the Node server rather than a static Live Server extension, because the app needs its backend APIs and event subscriptions. No API keys or `.env` file is required. Python/Playwright is optional and only used by the browser smoke test.
+You can also choose **Terminal → Run Task → Start commerce demo**. Use the Node server rather than a static Live Server extension, because the app needs its backend APIs and event subscriptions. No API keys are required for commerce simulation or workflow tests. Real Resend email needs `WORKFLOW_EMAIL_API_KEY` and a verified sender in `WORKFLOW_EMAIL_FROM`; set them in the process environment before starting. `.env` files are not automatically loaded. Python/Playwright is optional and only used by the browser smoke test.
 
 To update an existing clone, stop the server, run `git pull --ff-only` and `npm ci`, then restart it. The ignored `.data` folder preserves your local demo state.
 
@@ -109,6 +110,6 @@ For compatibility, `/api/events` still accepts the original normalized event for
 
 `npm test` covers CRUD projections, before/after integrity, duplicate/stale delivery, source subscriptions, retained-history rebuild, cross-source identities, persistence, migration, HTTP routes and live SSE. Optional `python3 test/browser_smoke.py` exercises all three screens against a running disposable demo. Its configuration is documented in that file; it requires Python Playwright and Chromium and resets the test database.
 
-See [scope and assumptions](docs/PROTOTYPE_SCOPE.md) and [investor walkthrough](docs/DEMO_GUIDE.md).
+See [workflow setup and use](docs/WORKFLOWS.md), [scope and assumptions](docs/PROTOTYPE_SCOPE.md) and [investor walkthrough](docs/DEMO_GUIDE.md).
 
 The cloud onboarding interface has no public app preview. No public hosting deployment has been performed. A hosted demo needs a Node 24 host with persistent disk and SSE support (one process), plus access controls before exposing its unauthenticated write/reset APIs publicly. Publishing the cloud environment saves files/configuration, not running server processes.

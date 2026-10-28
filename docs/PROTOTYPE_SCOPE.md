@@ -10,6 +10,8 @@ The supplied business pitch and requested scenarios are sufficient for an invest
 | Event simulator | Choose ERP or e-commerce, supported table, brand, create/update/delete and record data; select current records for update/delete; preview without mutation; explicitly publish to the hub |
 | Commerce hub | Independently subscribe to ERP orders, e-commerce orders and e-commerce carts; persist settings; rebuild from retained history; update charts, portfolio, carts and consumed-event feed live |
 
+Workflow automation adds a fourth view: an editable trigger/condition/HTTP/email canvas with saved event subscriptions, anchored interval schedules, variable mapping, execution history and Resend integration. See [workflow scope and setup](WORKFLOWS.md). Resend needs a configured key and verified sender; manual tests capture emails without sending.
+
 These are views of one existing Node application in `srilony/TraBot`, not separate apps or repositories. Separating simulation from observation makes the publisher/hub/subscriber roles explicit.
 
 ## Assumptions and metric rules
@@ -60,6 +62,6 @@ Reset is an explicit simulator action that deletes active CDC/source data and re
 
 ## Deferred business and platform scope
 
-Inventory, fulfillment, service/feedback, finance reconciliation, configurable workflow/custom-app builders, live connectors, identity/consent, authentication and multi-currency handling are outside this version. An independent durable broker, retry/dead-letter queues, partitions, consumer checkpoints and multi-process delivery guarantees are also deferred.
+Inventory, fulfillment, service/feedback, finance reconciliation, custom-app builders, production workflow orchestration, live connectors, identity/consent, authentication and multi-currency handling are outside this version. An independent durable broker, retry/dead-letter queues, partitions, consumer checkpoints and multi-process delivery guarantees are also deferred.
 
 The pitch's external market/returns statistics were not independently verified for this implementation and are not used as proof in the app. The proposed differentiation and willingness to pay remain hypotheses. A useful next validation is to show this flow to a portfolio operator, compare it with a real exception they handled, and seek a concrete pilot commitment if it changes their decision.
