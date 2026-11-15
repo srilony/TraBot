@@ -1,6 +1,8 @@
 # Commerce Operations Hub
 
-A prototype with four connected features in one application and repository:
+An event based analytics dashboard allowing actionability through configurable workflow automation.
+
+The codebase provides a prototype with four connected features in one application and repository:
 
 - **Commerce hub** (`/`): live charts and portfolio metrics from the source/table channels you subscribe to.
 - **Event hub** (`/event-hub`): the complete accepted CDC event journal, with source system, receipt/event timestamps, filters, pagination, and before/after inspection.
