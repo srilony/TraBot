@@ -7,7 +7,7 @@ The codebase provides a prototype with four connected features in one applicatio
 - **Commerce hub** (`/`): live charts and portfolio metrics from the source/table channels you subscribe to.
 - **Event hub** (`/event-hub`): the complete accepted CDC event journal, with source system, receipt/event timestamps, filters, pagination, and before/after inspection.
 - **Event simulator** (`/simulator`): select a system of record, table, brand and record change; preview the CDC envelope, then publish it to the hub.
-- **Workflow automation** (`/workflows`): drag and connect trigger, condition, HTTP Get and email blocks; save flows, test them, inspect runs and enable event/schedule automation.
+- **Workflow automation** (`/workflows`): drag and connect trigger, condition, HTTP Get, Update CRM and email blocks; save flows, test them, inspect runs and enable event/schedule automation.
 
 The included ERP and e-commerce systems, brands and source data are fictional. CDC messages simulate database changes; no real database connector or commerce store is connected.
 
@@ -111,6 +111,8 @@ For compatibility, `/api/events` still accepts the original normalized event for
 ## Verification and presentation
 
 `npm test` covers CRUD projections, before/after integrity, duplicate/stale delivery, source subscriptions, retained-history rebuild, cross-source identities, persistence, migration, HTTP routes and live SSE. Optional `python3 test/browser_smoke.py` exercises all three screens against a running disposable demo. Its configuration is documented in that file; it requires Python Playwright and Chromium and resets the test database.
+
+Custom customer JSON can be previewed in the simulator and published to the event hub. Workflow triggers expose the full typed payload; **Update CRM** sends authenticated server-side POSTs using the `n8n-basic` credential reference. Bind `N8N_BASIC_USERNAME` and `N8N_BASIC_PASSWORD` securely on the server. CRM tests make real requests; failed writes are never retried automatically. See the customer integration section in [workflow setup and use](docs/WORKFLOWS.md) for configuration, browser tests, and the single-call live verification command.
 
 See [workflow setup and use](docs/WORKFLOWS.md), [scope and assumptions](docs/PROTOTYPE_SCOPE.md) and [investor walkthrough](docs/DEMO_GUIDE.md).
 

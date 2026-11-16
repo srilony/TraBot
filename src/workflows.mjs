@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { AppError, SYSTEMS } from './store.mjs';
+import { AppError, SYSTEMS, CUSTOMER_SYSTEM, customerPayload, rejectCredentials } from './store.mjs';
 
-const TYPES = new Set(['event_trigger', 'schedule_trigger', 'condition', 'http_get', 'email']);
+const TYPES = new Set(['event_trigger', 'schedule_trigger', 'condition', 'http_get', 'update_crm', 'email']);
 const UNITS = { seconds: 1000, minutes: 60000, hours: 3600000, days: 86400000 };
 const BAD_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'exists']);
@@ -81,7 +81,7 @@ export function validateWorkflow(definition) {
     const c = node.config;
     if (!isObject(c)) { error('Configure this block.', node.id); continue; }
     if (node.type === 'event_trigger') {
-      if (!Array.isArray(c.matches) || !c.matches.length || c.matches.length > 9 || c.matches.some(m => !isObject(m) || !SYSTEMS.some(s => s.id === m.systemId && s.tables.includes(m.table)) || !['c', 'u', 'd'].includes(m.op))) error('Select one or more source/event types.', node.id);
+      if (!Array.isArray(c.matches) || !c.matches.length || c.matches.length > 10 || c.matches.some(m => !isObject(m) || ![...SYSTEMS, CUSTOMER_SYSTEM].some(s => s.id === m.systemId && s.tables.includes(m.table)) || !(m.systemId === 'custom' ? ['c'] : ['c', 'u', 'd']).includes(m.op))) error('Select one or more source/event types.', node.id);
       const fields = c.fields ?? [], names = new Set();
       if (!Array.isArray(fields) || fields.length > 30) error('Select at most 30 named event fields.', node.id);
       else for (const field of fields) {
@@ -103,6 +103,18 @@ export function validateWorkflow(definition) {
       }
     }
     if (node.type === 'http_get' && (typeof c.url !== 'string' || !c.url.trim() || c.url.length > 4096)) error('Enter an HTTP GET URL.', node.id);
+    if (node.type === 'update_crm') {
+      try { const url = new URL(c.url); if (c.credentialRef !== 'n8n-basic' || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error(); } catch { error('Choose n8n-basic and its bound HTTPS webhook URL without embedded credentials, query or fragment.', node.id); }
+      if (typeof c.table !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(c.table) || typeof c.idField !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(c.idField) || !isObject(c.fields) || !Object.keys(c.fields).length) error('Configure table, idField and customer fields.', node.id);
+      else {
+        if (!Object.hasOwn(c.fields, c.idField) || Object.keys(c.fields).some(key => !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) || BAD_KEYS.has(key))) error('Customer fields need safe names and must include the ID field.', node.id);
+        for (const value of Object.values(c.fields)) {
+          if (!isObject(value) || !['constant', 'path'].includes(value.kind)) error('Customer fields require a typed constant or variable path.', node.id);
+          else if (!Object.hasOwn(value, 'value')) error('Each customer mapping needs a value.', node.id);
+          else if (value.kind === 'path') { try { readPath({}, value.value, { optional: true }); } catch { error('Invalid customer variable path.', node.id); } }
+        }
+      }
+    }
     if (node.type === 'email') {
       if (!['resend', 'outbox'].includes(c.delivery)) error('Choose Resend or demo outbox delivery.', node.id);
       if (typeof c.to !== 'string' || !c.to.trim() || typeof c.subject !== 'string' || !c.subject.trim() || typeof c.text !== 'string' || !c.text.trim()) error('Enter recipient, subject and message text.', node.id);
@@ -180,6 +192,7 @@ export class WorkflowEngine {
   }
   list() { return { workflows: this.db.prepare('SELECT id FROM workflow_definitions ORDER BY updated_at DESC,id').all().map(row => this.get(row.id)) }; }
   save(input, requestedId) {
+    rejectCredentials(input);
     if (!isObject(input) || JSON.stringify(input).length > 128000 || !Array.isArray(input.nodes) || !Array.isArray(input.edges) || input.nodes.length > 25 || input.edges.length > 50)
       throw new AppError('A workflow needs arrays of at most 25 nodes and 50 edges.');
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 100) throw new AppError('Give the workflow a name of at most 100 characters.');
@@ -189,6 +202,10 @@ export class WorkflowEngine {
     const old = this.db.prepare('SELECT * FROM workflow_definitions WHERE id=?').get(id);
     if (requestedId && !old) throw new AppError('Workflow not found.', 404);
     if (old && input.revision !== undefined && input.revision !== old.revision) throw new AppError('This workflow changed in another window. Reload before saving.', 409);
+    for (const node of input.nodes.filter(n => n.type === 'update_crm')) {
+      try { const url = new URL(node.config.url); if (url.username || url.password || url.search || url.hash) throw new Error(); } catch { throw new AppError('Use a webhook URL without embedded credentials, query or fragment.'); }
+      if (Object.keys(node.config).some(k => !['url','credentialRef','table','idField','fields'].includes(k))) throw new AppError('CRM configuration accepts only credential references, never credentials or headers.');
+    }
     const definition = { id, name: input.name.trim(), enabled: input.enabled ?? false, nodes: clone(input.nodes), edges: clone(input.edges) };
     const validation = validateWorkflow(definition);
     if (definition.enabled && !validation.valid) { const e = new AppError(`Invalid workflow graph: ${validation.errors[0].message}`, 400); e.details = validation.errors; throw e; }
@@ -345,6 +362,12 @@ export class WorkflowEngine {
           } else if (current.type === 'http_get') {
             const url = renderTemplate(c.url, context, { encode: true }); step.input = { url };
             step.output = await this.io.getJSON(url);
+          } else if (current.type === 'update_crm') {
+            const data = Object.fromEntries(Object.entries(c.fields).map(([key, value]) => [key, operand(value, context)]));
+            const payload = customerPayload({ table: c.table, idField: c.idField, data }, { customerEvent: false });
+            rejectCredentials(payload);
+            step.input = { payload, credentialRef: c.credentialRef, url: c.url };
+            step.output = await this.io.updateCRM(c, payload, { runId: row.id, nodeId: current.id });
           } else if (current.type === 'email') {
             const message = { delivery: c.delivery, to: renderTemplate(c.to, context), subject: renderTemplate(c.subject, context), text: renderTemplate(c.text, context) };
             step.input = { ...message, testCapture: row.mode === 'test' };
@@ -364,7 +387,7 @@ export class WorkflowEngine {
     }
   }
   catalog() {
-    const eventOptions = SYSTEMS.flatMap(s => s.tables.flatMap(table => ['c', 'u', 'd'].map(op => ({ id: `${s.id}:${table}:${op}`, systemId: s.id, table, op, label: `${s.name} · ${table === 'orders' ? 'Order' : 'Cart'} ${op === 'c' ? 'created' : op === 'u' ? 'updated' : 'deleted'}` }))));
+    const eventOptions = [...SYSTEMS, CUSTOMER_SYSTEM].flatMap(s => s.tables.flatMap(table => (s.id === 'custom' ? ['c'] : ['c', 'u', 'd']).map(op => ({ id: `${s.id}:${table}:${op}`, systemId: s.id, table, op, label: `${s.name} · ${table === 'orders' ? 'Order' : table === 'customers' ? 'Customer event' : 'Cart'} ${op === 'c' ? 'created' : op === 'u' ? 'updated' : 'deleted'}` }))));
     const eventExample = { name: 'Order threshold alert', enabled: false, nodes: [
       { id: 'trigger', type: 'event_trigger', position: { x: 80, y: 150 }, config: { matches: [{ systemId: 'erp', table: 'orders', op: 'c' }], fields: [{ key: 'amount', path: 'event.after.amountCents' }, { key: 'orderId', path: 'event.after.orderId' }] } },
       { id: 'lookup', type: 'http_get', position: { x: 350, y: 150 }, config: { url: '/api/workflow-demo/reference?brandId={{event.brandId}}' } },
@@ -380,7 +403,7 @@ export class WorkflowEngine {
       { id: 'lookup', type: 'http_get', position: { x: 350, y: 130 }, config: { url: '/api/workflow-demo/reference?brandId=northstar' } },
       { id: 'email', type: 'email', position: { x: 620, y: 130 }, config: { delivery: 'resend', to: 'operations@example.invalid', subject: 'Scheduled commerce check', text: 'Scheduled at {{schedule.scheduledAt}}. Reference limit: {{nodes.lookup.data.limitCents}} EUR cents.' } },
     ], edges: [{ id: 's1', source: 'schedule', target: 'lookup', port: 'next' }, { id: 's2', source: 'lookup', target: 'email', port: 'next' }] };
-    return { eventOptions, examples: [eventExample, scheduleExample], variablePaths: ['event.eventId', 'event.sequence', 'event.brandId', 'event.systemId', 'event.table', 'event.op', 'event.occurredAt', 'event.receivedAt', 'event.source.name', 'event.source.captureMode', 'event.after.orderId', 'event.after.cartId', 'event.after.amountCents', 'event.after.currency', 'event.after.status', 'event.before.amountCents', 'event.payload.amountCents', 'event.payload.orderId', 'event.payload.cartId', 'event.payload.status', 'schedule.scheduledAt', 'schedule.missedIntervals'], capabilities: this.io.capabilities(), limits: { maxNodes: 25, maxEdges: 50 } };
+    return { eventOptions, examples: [eventExample, scheduleExample], variablePaths: ['event.data', 'event.idField', 'event.data.customerid', 'event.data.name', 'event.data.emailid', 'event.data.phone', 'event.data.nationality', 'event.data.documentID', 'event.eventId', 'event.sequence', 'event.brandId', 'event.systemId', 'event.table', 'event.op', 'event.occurredAt', 'event.receivedAt', 'event.source.name', 'event.source.captureMode', 'event.after.orderId', 'event.after.cartId', 'event.after.amountCents', 'event.after.currency', 'event.after.status', 'event.before.amountCents', 'event.payload.amountCents', 'event.payload.orderId', 'event.payload.cartId', 'event.payload.status', 'schedule.scheduledAt', 'schedule.missedIntervals'], capabilities: this.io.capabilities(), limits: { maxNodes: 25, maxEdges: 50 } };
   }
   async close() {
     this.closed = true; clearInterval(this.timer); this.unsubscribe?.();

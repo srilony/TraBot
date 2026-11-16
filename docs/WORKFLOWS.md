@@ -100,3 +100,63 @@ This remains a single-process prototype, not a distributed durable workflow plat
 | GET | `/api/workflows/capabilities` | Credential presence and HTTP limits, no secret values |
 
 Run `npm test` for engine, schedule, IO and HTTP integration checks. Optional browser workflow checks use `test/workflow_browser.py` against a disposable database. They use outbox capture and must not send real email.
+
+## Customer events and Update CRM
+
+The existing simulator has a **Custom customer event** JSON editor. Preview validates without publishing; **Publish to event hub** commits to the same journal and notifies enabled workflows. The hub supports **Custom customer events / Customers** filters and displays the complete payload. Customer events are separate from commerce projections and subscriptions. Use synthetic data for demonstrations:
+
+```json
+{
+  "table": "customers",
+  "idField": "customerid",
+  "data": {
+    "customerid": 123,
+    "name": "SYNTHETIC Demo Customer",
+    "emailid": "demo@example.invalid",
+    "phone": "0000000000",
+    "nationality": "Indian",
+    "documentID": "DEMO-123"
+  }
+}
+```
+
+POST this structure directly to `/api/hub/events`, or preview it at `/api/simulator/preview` and publish the returned `event`. The hub supplies event ID, receipt sequence, timestamps, `systemId: "custom"`, `op: "c"` and source metadata. An optional stable `eventId` deduplicates delivery; a conflicting payload with the same event ID is rejected. A new event ID represents a new event even when the customer ID is unchanged. No customer database persistence is implied by ingestion into this journal.
+
+In the visual editor, add an **Event trigger**, select **Custom customer events · Customer event created**, and remove any unwanted order/cart mappings. The complete customer payload is accessible as `event.table`, `event.idField`, and `event.data`. Map selected fields such as `event.data.customerid` into `vars.customerId`; numbers, strings, booleans and null remain native JSON values. Customer column names use **emailid**, not `email`.
+
+Connect an **Update CRM** block. Configure table (default `customers`), ID field (default `customerid`), and the customer fields JSON mapping. Each field selects a typed constant or a safe variable path, including previous node output:
+
+```json
+{
+  "customerid": { "kind": "path", "value": "vars.customerId" },
+  "name": { "kind": "constant", "value": "SYNTHETIC Demo Customer" },
+  "emailid": { "kind": "path", "value": "event.data.emailid" },
+  "phone": { "kind": "path", "value": "nodes.lookup.data.phone" }
+}
+```
+
+The outbound body is `{ "table": ..., "idField": ..., "data": ... }`. The ID field must exist in data and hold a nonempty string or safe integer. Table/field names must be safe identifiers. Paths preserve complete values, rather than interpolating them into strings.
+
+The **n8n-basic** credential reference resolves only on the server from `N8N_BASIC_USERNAME` and `N8N_BASIC_PASSWORD`. Bind these securely before starting the server; `.env` files are not loaded. Neither credential value nor Authorization header belongs in the editor, a definition, API response or run log. Credential/header keys and known credential values are rejected from saved definitions/customer data, including drafts. Capability responses expose configuration presence only.
+
+Default bound POST URL:
+
+```text
+https://srilony.app.n8n.cloud/webhook-test/cdc-webhook
+```
+
+The editable node URL must match the credential reference's bound server URL. An operator can explicitly change that binding with `N8N_WEBHOOK_URL`; this does not happen automatically. HTTPS without embedded credentials, query or fragment is required. DNS is checked for public addresses and pinned for the request. Redirects are rejected to prevent forwarding credentials. No production URL fallback exists.
+
+**Test flow sends a real CRM POST.** Only email is captured in test mode. Before an actual test, select **Listen for test event** in n8n and use a fresh synthetic customer ID. Each run/node is attempted at most once, including across restarts; failed, timed-out and interrupted database-writing requests are never automatically retried. A new manual test creates a new run and may write again. Check the n8n/database outcome before doing that.
+
+Run history shows HTTP acceptance/status or a controlled error, never remote response bodies/headers that might reflect credentials. An HTTP 404 reports that the test webhook may not be registered and asks the operator to enable its listener. HTTP 2xx produces `outcome: "accepted", persistence: "unverified"`; it does **not** establish database persistence. Verify the customer row independently in the destination database or n8n execution evidence.
+
+For one explicit live verification, securely bind the two credentials, start the n8n test listener, then run:
+
+```sh
+node scripts/verify-crm.mjs --listening
+```
+
+This uses the same authenticated CRM adapter, a temporary in-memory journal, a fresh numeric ID, and clearly labelled synthetic customer data. It makes one request, reports only safe outcome details, and never retries. It refuses to run without credentials/listener acknowledgement or against a different URL. Verification may leave the synthetic row in the destination database; it never changes the local application database.
+
+`npm test` includes customer persistence, HTTP ingestion, typed event/previous-node mappings, authenticated transport, destination binding, hostile response redaction, deduplication, and failure/no-retry checks. `python3 test/customer_browser.py` launches its own in-memory app and exercises simulator → hub → visual editor → CRM → run history with a mocked external transport. It needs Python Playwright and Chromium (`CHROMIUM_PATH` optional), never sends a real webhook, and never touches `.data`.

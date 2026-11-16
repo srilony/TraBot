@@ -1,3 +1,4 @@
+import { rejectCredentials } from './store.mjs';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { request as httpRequest } from 'node:http';
@@ -96,11 +97,19 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
     provider_message_id TEXT, error TEXT, UNIQUE(run_id,node_id)
   )`);
 
+  const crmURL = () => {
+    try {
+      const url = new URL(env.N8N_WEBHOOK_URL || 'https://srilony.app.n8n.cloud/webhook-test/cdc-webhook');
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return '';
+      return url.href;
+    } catch { return ''; }
+  };
   const credentials = () => ({ key: env.WORKFLOW_EMAIL_API_KEY || env.RESEND_API_KEY || '', sender: env.WORKFLOW_EMAIL_FROM || '' });
   function capabilities() {
     const { key, sender } = credentials();
     return {
       email: { provider: 'resend', configured: !!key && senderEmail(sender), keyConfigured: !!key, senderConfigured: senderEmail(sender) },
+      crm: { credentialRef: 'n8n-basic', configured: !!env.N8N_BASIC_USERNAME && !!env.N8N_BASIC_PASSWORD && !!crmURL(), url: crmURL() },
       httpGet: { timeoutMs: TIMEOUT_MS, maxResponseBytes: MAX_RESPONSE_BYTES },
     };
   }
@@ -122,10 +131,10 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
     return addresses.map(result => ({ address: result.address, family: isIP(result.address) }));
   }
 
-  function pinnedGet(url, addresses, signal) {
+  function pinnedRequest(url, addresses, signal, post = null) {
     return new Promise((resolve, reject) => {
       const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
-        method: 'GET', headers: { Accept: 'application/json', 'Accept-Encoding': 'identity' }, signal,
+        method: post ? 'POST' : 'GET', headers: { Accept: 'application/json', 'Accept-Encoding': 'identity', ...(post?.headers ?? {}) }, signal,
         ...(addresses ? { lookup: (_host, options, callback) => {
           if (options?.all) callback(null, addresses);
           else callback(null, addresses[0].address, addresses[0].family);
@@ -153,7 +162,7 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
         } catch (error) { incoming.destroy(); reject(error); }
       });
       request.once('error', reject);
-      request.end();
+      request.end(post?.body);
     });
   }
 
@@ -173,7 +182,7 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
         const addresses = await waitWithAbort(resolveTarget(target, internal), signal);
         const response = await waitWithAbort(fetchImpl
           ? fetchImpl(target.href, { method: 'GET', headers: { Accept: 'application/json' }, redirect: 'manual', signal })
-          : pinnedGet(target, addresses, signal), signal);
+          : pinnedRequest(target, addresses, signal), signal);
         if ([301, 302, 303, 307, 308].includes(response.status)) {
           const location = response.headers.get('location');
           await response.body?.cancel().catch(() => {});
@@ -254,6 +263,35 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
     }
   }
 
+  db.exec(`CREATE TABLE IF NOT EXISTS workflow_crm_attempts (run_id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(run_id,node_id))`);
+  async function updateCRM(config, payload, { runId, nodeId }) {
+    const boundURL = crmURL();
+    if (!boundURL) throw safeError('Configure a valid HTTPS CRM connection URL without embedded credentials, query or fragment.');
+    if (config.credentialRef !== 'n8n-basic' || config.url !== boundURL) throw safeError('CRM credential reference is bound to the configured n8n test webhook only.');
+    rejectCredentials(payload, env);
+    const targetURL = new URL(boundURL);
+    if (targetURL.protocol !== 'https:' || targetURL.username || targetURL.password) throw safeError('CRM connection requires an HTTPS URL without embedded credentials.');
+    const username = env.N8N_BASIC_USERNAME, password = env.N8N_BASIC_PASSWORD;
+    if (username?.includes(':')) throw safeError('Basic Auth username cannot contain a colon.');
+    if (!username || !password) throw safeError('Configure N8N_BASIC_USERNAME and N8N_BASIC_PASSWORD on the server.');
+    const attempt = db.prepare('INSERT OR IGNORE INTO workflow_crm_attempts VALUES (?,?)').run(runId, nodeId);
+    if (!attempt.changes) throw safeError('CRM request was already attempted; no automatic retry was made.');
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    try {
+      const target = new URL(boundURL), addresses = await waitWithAbort(resolveTarget(target, false), signal);
+      const post = { headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` }, body: JSON.stringify(payload) };
+      const response = await waitWithAbort(fetchImpl ? fetchImpl(boundURL, { method: 'POST', ...post, redirect: 'manual', signal }) : pinnedRequest(target, addresses, signal, post), signal);
+      // Never retain remote headers/body: either may echo Authorization or secrets.
+      await response.body?.cancel().catch(() => {});
+      if (!response.ok) throw safeError(response.status === 404
+        ? 'Update CRM failed (HTTP 404). The n8n test webhook may not be registered: select Listen for test event in n8n before another manual attempt. No automatic retry was made.'
+        : `Update CRM failed (HTTP ${response.status}). Check the connection and n8n execution. No automatic retry was made.`);
+      return { status: response.status, outcome: 'accepted', persistence: 'unverified' };
+    } catch (error) {
+      if (error.status) throw error;
+      throw safeError('Update CRM request failed or timed out; database persistence is unknown. No automatic retry was made.');
+    }
+  }
   function outbox(limit = 100) {
     if (!Number.isSafeInteger(Number(limit)) || Number(limit) < 1 || Number(limit) > 500) throw safeError('Outbox limit must be an integer from 1 to 500.');
     return db.prepare('SELECT * FROM workflow_outbox ORDER BY created_at DESC,rowid DESC LIMIT ?').all(Number(limit)).map(row => ({
@@ -261,5 +299,5 @@ export function createWorkflowIO({ db, getOrigin, fetchImpl, lookup = dnsLookup,
       delivery: row.delivery, status: row.status, createdAt: row.created_at, providerMessageId: row.provider_message_id, error: row.error,
     }));
   }
-  return { getJSON, sendEmail, capabilities, outbox };
+  return { getJSON, updateCRM, sendEmail, capabilities, outbox };
 }

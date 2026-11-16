@@ -6,6 +6,7 @@ const TYPES = {
   event_trigger: { title:'Event trigger', short:'Event', subtitle:'Listen to a hub event', icon:'E', prefix:'event' },
   schedule_trigger: { title:'Schedule trigger', short:'Schedule', subtitle:'Start at a set interval', icon:'T', prefix:'schedule' },
   condition: { title:'If / then / else', short:'Condition', subtitle:'Choose the next branch', icon:'?', prefix:'condition' },
+  update_crm: { title:'Update CRM', short:'CRM POST', subtitle:'Send customer data to n8n', icon:'CRM', prefix:'crm' },
   http_get: { title:'Get data', short:'HTTP GET', subtitle:'Bring in system context', icon:'GET', prefix:'lookup' },
   email: { title:'Send email', short:'Email', subtitle:'Send through Resend', icon:'@', prefix:'email' },
 };
@@ -59,6 +60,7 @@ function loadFlow(flow,dirty=false){
 }
 async function refreshWorkflows(){const result=await api('/api/workflows');state.workflows=result.workflows||[];refreshPicker();}
 async function saveFlow(enabled=state.flow.enabled){
+  if($('wfCrmFields')&&!$('wfCrmFields').reportValidity())throw new Error('Fix customer field JSON before saving.');
   const body={...definition(),enabled};
   const response=await api(state.flow.id?`/api/workflows/${encodeURIComponent(state.flow.id)}`:'/api/workflows',{method:state.flow.id?'PUT':'POST',body});
   const previous=state.selected;state.flow=response.workflow;state.flow.nodes??=[];state.flow.edges??=[];state.selected=previous&&nodeById(previous)?previous:null;setDirty(false);
@@ -68,6 +70,7 @@ function defaultConfig(type){
   if(type==='event_trigger')return {matches:[{systemId:'erp',table:'orders',op:'c'}],fields:[{key:'amount',path:'event.after.amountCents'},{key:'orderId',path:'event.after.orderId'}]};
   if(type==='schedule_trigger')return {startAt:new Date(Date.now()+60000).toISOString(),interval:1,unit:'minutes'};
   if(type==='condition')return {left:{kind:'path',value:'vars.amount'},operator:'gt',right:{kind:'constant',value:15000}};
+  if(type==='update_crm')return {url:state.catalog?.capabilities?.crm?.url||'https://srilony.app.n8n.cloud/webhook-test/cdc-webhook',credentialRef:'n8n-basic',table:'customers',idField:'customerid',fields:Object.fromEntries(['customerid','name','emailid','phone','nationality','documentID'].map(key=>[key,{kind:'path',value:'event.data.'+key}]))};
   if(type==='http_get')return {url:'/api/workflow-demo/reference?brandId={{event.brandId}}'};
   return {delivery:'resend',to:'',subject:'Order {{event.after.orderId}} requires a review',text:'Order {{event.after.orderId}} has a value of {{event.after.amountCents}} EUR cents.'};
 }
@@ -142,6 +145,12 @@ function renderInspector(){
     html+=field('Comparison',`<select id="wfConditionOperator" data-config="operator">${[['eq','equals'],['neq','does not equal'],['gt','is greater than'],['gte','is greater than or equal to'],['lt','is less than'],['lte','is less than or equal to'],['contains','contains'],['exists','exists / is present']].map(([value,label])=>`<option value="${value}" ${c.operator===value?'selected':''}>${label}</option>`).join('')}</select>`);
     if(c.operator!=='exists')html+=operandEditor('right',c.right);
     html+='<div class="wf-info">True follows the <strong>Then</strong> connection. False follows <strong>Else</strong>. An unconnected branch ends the run.</div>';
+  }else if(node.type==='update_crm'){
+    html+=field('POST webhook URL',configInput('url',c.url),'Must match this credential reference’s server-bound URL (N8N_WEBHOOK_URL).');
+    html+=field('Server credential reference',`<select data-config="credentialRef"><option value="n8n-basic">n8n-basic</option></select>`,state.catalog?.capabilities?.crm?.configured?'Connection configured on server.':'Set N8N_BASIC_USERNAME and N8N_BASIC_PASSWORD on the server.');
+    html+=field('Table',configInput('table',c.table))+field('ID field',configInput('idField',c.idField));
+    html+=field('Customer fields (JSON)',`<textarea id="wfCrmFields" rows="15" spellcheck="false">${escape(JSON.stringify(c.fields,null,2))}</textarea>`,'Each field uses {"kind":"path","value":"event.data.customerid"} or {"kind":"constant","value":123}. Variables and earlier node paths preserve native types.');
+    html+='<p class="wf-field-hint">Test flow sends a real POST. No automatic retries. HTTP acceptance does not verify database persistence.</p>';
   }else if(node.type==='http_get'){
     html+=field('HTTP GET URL',`<textarea id="wfHttpUrl" data-config="url" data-template-field="true" class="wf-code-field" rows="4" spellcheck="false" placeholder="https://api.example.com/orders/{{vars.orderId}}">${escape(c.url||'')}</textarea>`,'Use a public JSON endpoint or the built-in demo reference. Variable values can be inserted in the URL.');
     html+=`<div class="wf-info">The JSON response is available as <code>nodes.${escape(node.id)}.data</code>. For the demo reference, compare against <code>nodes.${escape(node.id)}.data.limitCents</code>.</div>`;
@@ -172,6 +181,7 @@ $('nodeInspector').addEventListener('input',event=>{
   }
 });
 $('nodeInspector').addEventListener('change',event=>{
+  if(event.target.id==='wfCrmFields'){try{const fields=JSON.parse(event.target.value);if(!fields||Array.isArray(fields)||typeof fields!=='object')throw new Error();nodeById(state.selected).config.fields=fields;event.target.setCustomValidity('');configChanged(nodeById(state.selected));}catch{event.target.setCustomValidity('Enter a JSON object of field mappings.');event.target.reportValidity();}return;}
   const input=event.target,node=nodeById(state.selected);if(!node)return;
   if(input.dataset.match!==undefined){node.config.matches=[...$('nodeInspector').querySelectorAll('[data-match]:checked')].map(el=>{const source=state.catalog.eventOptions[Number(el.dataset.match)];return{systemId:source.systemId,table:source.table,op:source.op};});configChanged(node);}
   else if(input.dataset.operand&&input.dataset.part==='kind'){
@@ -199,7 +209,7 @@ async function refreshRuns(){
   if(!state.flow.id){$('runList').innerHTML='<p class="empty-state">Save a workflow, then test it or enable its trigger.</p>';$('runsCount').textContent='';return;}
   const id=state.flow.id,epoch=state.refreshEpoch;
   try{const result=await api(`/api/workflows/${encodeURIComponent(id)}/runs`);if(state.flow.id!==id||epoch!==state.refreshEpoch)return;state.runs=result.runs||[];$('runsCount').textContent=state.runs.length||'';
-    $('runList').innerHTML=state.runs.length?`<div class="table-scroll"><table class="wf-data-table"><thead><tr><th>Started</th><th>Status</th><th>Trigger</th><th>Mode</th><th>Detail</th></tr></thead><tbody>${state.runs.map(run=>`<tr><td>${escape(dateText(run.startedAt||run.createdAt))}<code>${escape(run.id)}</code></td><td><span class="wf-run-status ${escape(run.status)}">${escape(run.status)}</span></td><td>${escape(run.triggerType||'manual')}</td><td>${run.mode==='test'?'Test · outbox only':'Live'}</td><td><button class="wf-text-button" type="button" data-run="${escape(run.id)}">Inspect run →</button></td></tr>`).join('')}</tbody></table></div>`:'<p class="empty-state">No runs yet.<br>Use Test flow, or enable this workflow and publish a matching event.</p>';
+    $('runList').innerHTML=state.runs.length?`<div class="table-scroll"><table class="wf-data-table"><thead><tr><th>Started</th><th>Status</th><th>Trigger</th><th>Mode</th><th>Detail</th></tr></thead><tbody>${state.runs.map(run=>`<tr><td>${escape(dateText(run.startedAt||run.createdAt))}<code>${escape(run.id)}</code></td><td><span class="wf-run-status ${escape(run.status)}">${escape(run.status)}</span></td><td>${escape(run.triggerType||'manual')}</td><td>${run.mode==='test'?'Test · CRM sends real POST':'Live'}</td><td><button class="wf-text-button" type="button" data-run="${escape(run.id)}">Inspect run →</button></td></tr>`).join('')}</tbody></table></div>`:'<p class="empty-state">No runs yet.<br>Use Test flow, or enable this workflow and publish a matching event.</p>';
     if($('runDialog').open&&state.openRunId){const run=state.runs.find(r=>r.id===state.openRunId);if(run)renderRun(run,false);}
   }catch(error){$('runList').innerHTML=`<p class="wf-unavailable">${escape(error.message)}</p>`;}
 }
@@ -211,7 +221,7 @@ async function refreshOutbox(){
 function messageData(m){return{...m,id:m.id,runId:m.runId??m.run_id,nodeId:m.nodeId??m.node_id,to:m.to??m.to_address,createdAt:m.createdAt??m.created_at,providerMessageId:m.providerMessageId??m.provider_message_id};}
 function renderRun(run,open=true){
   state.openRunId=run.id;$('runDialogTitle').textContent=run.workflowName||state.flow.name||'Workflow run';
-  $('runOverview').innerHTML=`<div class="wf-run-metadata"><span><strong>Status</strong><span class="wf-run-status ${escape(run.status)}">${escape(run.status)}</span></span><span><strong>Run mode</strong>${run.mode==='test'?'Test · all emails captured in outbox':'Live trigger'}</span><span><strong>Started</strong>${escape(dateText(run.startedAt||run.createdAt))}</span><span><strong>Finished</strong>${escape(dateText(run.finishedAt))}</span><span><strong>Trigger</strong>${escape(run.triggerType||'manual')}</span><span><strong>Run ID</strong>${escape(run.id)}</span></div>${run.error?`<div class="wf-run-error">${escape(typeof run.error==='object'?JSON.stringify(run.error):run.error)}</div>`:''}`;
+  $('runOverview').innerHTML=`<div class="wf-run-metadata"><span><strong>Status</strong><span class="wf-run-status ${escape(run.status)}">${escape(run.status)}</span></span><span><strong>Run mode</strong>${run.mode==='test'?'Test · email captured; CRM sends real POST':'Live trigger'}</span><span><strong>Started</strong>${escape(dateText(run.startedAt||run.createdAt))}</span><span><strong>Finished</strong>${escape(dateText(run.finishedAt))}</span><span><strong>Trigger</strong>${escape(run.triggerType||'manual')}</span><span><strong>Run ID</strong>${escape(run.id)}</span></div>${run.error?`<div class="wf-run-error">${escape(typeof run.error==='object'?JSON.stringify(run.error):run.error)}</div>`:''}`;
   const steps=run.steps||[];
   const oldOpen=new Set([...$('runSteps').querySelectorAll('details[open]')].map(el=>el.dataset.step));
   $('runSteps').innerHTML=steps.length?steps.map((step,index)=>`<details class="wf-run-step" data-step="${escape(step.nodeId||index)}" ${oldOpen.has(String(step.nodeId||index))||index===steps.length-1?'open':''}><summary><strong>${escape(TYPES[step.nodeType]?.title||step.nodeType||'Step')}</strong><code>${escape(step.nodeId)}</code><span class="wf-run-status ${escape(step.status)}">${escape(step.status)}</span></summary><pre>${escape(JSON.stringify({input:step.input,output:step.output,...(step.error?{error:step.error}:{})},null,2))}</pre></details>`).join(''):'<p class="wf-field-hint">The run is waiting to execute its first block.</p>';
@@ -219,6 +229,7 @@ function renderRun(run,open=true){
 }
 function inspectMessage(id){const raw=state.messages.find(m=>m.id===id);if(!raw)return;const m=messageData(raw);$('messageTitle').textContent=m.subject||'Email action';$('messageMetadata').innerHTML=`<span><strong>Recipient</strong>${escape(m.to)}</span><span><strong>Status</strong>${escape(m.status)}${m.delivery==='outbox'?' · no message sent':''}</span><span><strong>Delivery</strong>${m.delivery==='outbox'?'Demo outbox':'Resend'}</span><span><strong>Created</strong>${escape(dateText(m.createdAt))}</span><span><strong>Run</strong>${escape(m.runId)}</span><span><strong>Provider message</strong>${escape(m.providerMessageId||'—')}</span>${m.error?`<span><strong>Error</strong>${escape(m.error)}</span>`:''}`;$('messageText').textContent=m.text||'';$('messageDialog').showModal();}
 async function openTest(){
+  $('testCrmNote').hidden=!state.flow.nodes.some(n=>n.type==='update_crm');
   const t=trigger();$('testScheduleNote').hidden=t?.type!=='schedule_trigger';$('testEvent').parentElement.hidden=t?.type==='schedule_trigger';$('testEvent').innerHTML='<option value="">Latest matching event from the hub</option>';
   if(t?.type==='event_trigger'){
     try{const data=await api('/api/hub/events?limit=100');const matches=(data.events||[]).filter(event=>(t.config.matches||[]).some(m=>m.systemId===event.systemId&&m.table===event.table&&m.op===event.op));$('testEvent').innerHTML+=[...matches].map(event=>`<option value="${escape(event.eventId)}">${escape(event.source?.name||event.systemId)} · ${escape(event.table)} ${escape(event.op)} · ${escape(event.after?.orderId||event.after?.cartId||event.before?.orderId||event.before?.cartId||event.eventId)}</option>`).join('');}catch(error){notify('Event choices could not load: '+error.message,true);}

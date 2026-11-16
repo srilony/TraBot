@@ -76,8 +76,8 @@ def main():
             page.goto(BASE + '/workflows', wait_until='networkidle')
             expect(page.locator('#wfServiceStatus')).to_have_text('Automation ready')
             expect(page.locator('#wfError')).to_be_hidden()
-            assert page.locator('.wf-palette-block').count() == 5
-            print('PASS: workflow feature loads with five component blocks and existing navigation')
+            assert page.locator('.wf-palette-block').count() == 6
+            print('PASS: workflow feature loads with six component blocks and existing navigation')
 
             # Use the actual palette, drag movement, output/input ports, and persisted layout.
             page.locator('#newWorkflow').click()

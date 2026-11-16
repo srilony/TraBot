@@ -7,6 +7,31 @@ export const BRANDS = [
   { id: 'atelier', name: 'Atelier', category: 'Apparel', color: '#c67a48', initials: 'A' },
   { id: 'fieldwork', name: 'Fieldwork', category: 'Outdoor', color: '#657aa2', initials: 'F' },
 ];
+export const CUSTOMER_SYSTEM = { id: 'custom', name: 'Custom customer events', tables: ['customers'] };
+export function customerPayload(input, { customerEvent = true } = {}) {
+  if (!object(input) || (customerEvent ? input.table !== 'customers' : typeof input.table !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(input.table)) || typeof input.idField !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(input.idField) || !object(input.data)) throw new AppError('Customer events require table customers, idField and a data object.');
+  if (Object.keys(input.data).some(k => !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k) || ['constructor','prototype','__proto__','password','authorization'].includes(k.toLowerCase()))) throw new AppError('Use safe customer field names without credentials.');
+  const key = input.data[input.idField];
+  if (!(typeof key === 'string' && key.length > 0 && key.length <= 100 || Number.isSafeInteger(key))) throw new AppError('Customer identifier must be a nonempty string or safe integer.');
+  rejectCredentials(input.data);
+  if (JSON.stringify(input.data).length > 64000) throw new AppError('Customer data exceeds 64000 characters.');
+  return JSON.parse(JSON.stringify({ table: input.table, idField: input.idField, data: input.data }));
+}
+// Credentials belong exclusively to server-side environment bindings.
+export function rejectCredentials(value, env = process.env) {
+  const encoded = JSON.stringify(value);
+  const username = env.N8N_BASIC_USERNAME, password = env.N8N_BASIC_PASSWORD;
+  const secrets = [username, password, username && password ? Buffer.from(`${username}:${password}`).toString('base64') : null].filter(Boolean);
+  const visit = item => {
+    if (!item || typeof item !== 'object') return;
+    for (const [key, child] of Object.entries(item)) {
+      if (/^(password|authorization|username|headers|basicAuth)$/i.test(key)) throw new AppError('Use server credential references; credentials and authentication headers cannot be stored.');
+      visit(child);
+    }
+  };
+  visit(value);
+  if (secrets.some(secret => encoded.includes(secret))) throw new AppError('Server credentials cannot be stored in application data.');
+}
 export const SYSTEMS = [
   { id: 'erp', name: 'ERP', tables: ['orders'] },
   { id: 'ecommerce', name: 'E-commerce platform', tables: ['orders', 'carts'] },
@@ -155,6 +180,7 @@ export class CommerceStore {
     return this.db.prepare('SELECT * FROM cdc_records WHERE system_id=? AND entity_table=? AND brand_id=? AND record_id=?').get(systemId, table, brandId, key);
   }
   decodeEvent(row) {
+    if (row.system_id === 'custom') return { ...JSON.parse(row.legacy_json), sequence: row.sequence, eventId: row.event_id, occurredAt: row.occurred_at, receivedAt: row.received_at, systemId: 'custom', op: 'c', type: 'customer.custom', source: { ...CUSTOMER_SYSTEM, captureMode: 'custom-event' } };
     const before = row.before_json ? JSON.parse(row.before_json) : null;
     const after = row.after_json ? JSON.parse(row.after_json) : null;
     const data = after ?? before;
@@ -166,7 +192,25 @@ export class CommerceStore {
       source: { systemId: row.system_id, name: SYSTEMS.find(s => s.id === row.system_id).name, table: row.entity_table, captureMode: row.capture_mode },
       type, payload: data, brandName: BRANDS.find(b => b.id === row.brand_id).name };
   }
+  ingestCustomer(input, options = {}) {
+    rejectCredentials(input);
+    const payload = customerPayload(input), eventId = input.eventId === undefined ? randomUUID() : id(input.eventId, 'eventId');
+    const existing = this.db.prepare('SELECT * FROM cdc_events WHERE event_id=?').get(eventId);
+    if (existing) {
+      if (existing.system_id !== 'custom' || existing.legacy_json !== JSON.stringify(payload)) throw new AppError('eventId already exists with different content.', 409);
+      return { ok: true, duplicate: true, event: this.decodeEvent(existing) };
+    }
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.db.prepare(`INSERT INTO cdc_events (event_id,occurred_at,received_at,system_id,entity_table,brand_id,record_id,op,capture_mode,legacy_json) VALUES (?,?,?,'custom','customers','',?,'c','custom-event',?)`).run(eventId, now, now, String(payload.data[payload.idField]), JSON.stringify(payload));
+      this.bumpRevision();
+    });
+    const event = this.decodeEvent(this.db.prepare('SELECT * FROM cdc_events WHERE event_id=?').get(eventId));
+    if (options.notify !== false) this.hub.emit('commerce.event', event);
+    return { ok: true, duplicate: false, event };
+  }
   ingest(input, options = {}) {
+    if (input?.table === 'customers') return this.ingestCustomer(input, options);
     if (input?.type && !input?.op) return this.ingestLegacy(input, options);
     const event = validateCDC(input);
     const existing = this.db.prepare('SELECT * FROM cdc_events WHERE event_id=?').get(event.eventId);
@@ -244,6 +288,7 @@ export class CommerceStore {
   }
   simulatePreview(input) {
     if (!object(input)) throw new AppError('A simulator configuration is required.');
+    if (input.table === 'customers') return { event: { ...customerPayload(input), eventId: randomUUID() } };
     const { systemId, table, op, brandId } = input;
     channel(systemId, table); brand(brandId);
     if (!['c', 'u', 'd'].includes(op)) throw new AppError('Choose a create, update or delete operation.');
@@ -271,8 +316,8 @@ export class CommerceStore {
   }
   hubEvents(filters = {}) {
     const { systemId = 'all', table = 'all', op = 'all', brandId = 'all' } = filters;
-    if (systemId !== 'all' && !SYSTEMS.some(s => s.id === systemId)) throw new AppError('Unknown source system.');
-    if (table !== 'all' && !['orders', 'carts'].includes(table)) throw new AppError('Unknown source table.');
+    if (systemId !== 'all' && ![...SYSTEMS, CUSTOMER_SYSTEM].some(s => s.id === systemId)) throw new AppError('Unknown source system.');
+    if (table !== 'all' && !['orders', 'carts', 'customers'].includes(table)) throw new AppError('Unknown source table.');
     if (op !== 'all' && !['c', 'u', 'd'].includes(op)) throw new AppError('Unknown CDC operation.');
     if (brandId !== 'all') brand(brandId);
     const limit = Number(filters.limit ?? 50), offset = Number(filters.offset ?? 0);
@@ -284,7 +329,7 @@ export class CommerceStore {
     const where = conditions.length ? ' WHERE ' + conditions.join(' AND ') : '';
     const total = this.db.prepare('SELECT COUNT(*) AS count FROM cdc_events' + where).get(...values).count;
     const events = this.db.prepare('SELECT * FROM cdc_events' + where + ' ORDER BY sequence DESC LIMIT ? OFFSET ?').all(...values, limit, offset).map(r => this.decodeEvent(r));
-    return { events, total, limit, offset, revision: this.revision(), systems: SYSTEMS, brands: BRANDS };
+    return { events, total, limit, offset, revision: this.revision(), systems: [...SYSTEMS, CUSTOMER_SYSTEM], brands: BRANDS };
   }
   selectedRecords() {
     const rules = this.getSubscriptions().subscriptions;

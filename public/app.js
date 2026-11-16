@@ -15,7 +15,7 @@ const timestamp = value => {
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 23)}` : '—';
 };
-const recordId = event => event.after?.orderId || event.after?.cartId || event.before?.orderId || event.before?.cartId || event.payload?.orderId || event.payload?.cartId || '—';
+const recordId = event => event.data?.[event.idField] ?? (event.after?.orderId || event.after?.cartId || event.before?.orderId || event.before?.cartId || event.payload?.orderId || event.payload?.cartId || '—');
 function notify(message, error = false) {
   clearTimeout(state.toastTimer); $('toast').textContent = message; $('toast').classList.toggle('error', error); $('toast').hidden = false;
   state.toastTimer = setTimeout(() => { $('toast').hidden = true; }, error ? 8000 : 4500);
@@ -132,7 +132,7 @@ function connect() {
 function inspectEvent(event) {
   $('eventDialogTitle').textContent = `${opName(event.op)} ${event.table} · ${recordId(event)}`;
   $('eventMetadata').innerHTML = `<span><strong>Source</strong>${escape(event.source?.name || systemName(event.systemId))} / ${escape(event.table)}</span><span><strong>Brand</strong>${escape(brandName(event.brandId))}</span><span><strong>Received at · UTC</strong>${escape(timestamp(event.receivedAt))}</span><span><strong>Event time · UTC</strong>${escape(timestamp(event.occurredAt))}</span>`;
-  $('eventBefore').textContent = JSON.stringify(event.before, null, 2); $('eventAfter').textContent = JSON.stringify(event.after, null, 2); $('eventEnvelope').textContent = JSON.stringify(event, null, 2); $('eventDialog').showModal();
+  $('eventBefore').textContent = JSON.stringify(event.before, null, 2); $('eventAfter').textContent = JSON.stringify(event.data ?? event.after, null, 2); $('eventEnvelope').textContent = JSON.stringify(event, null, 2); $('eventDialog').showModal();
 }
 function invalidatePreview() {
   state.preview = null; $('publishEvent').disabled = true; $('previewBadge').textContent = 'CDC';
@@ -207,7 +207,7 @@ async function initialize() {
     const brands = state.catalog.brands.map(b => `<option value="${escape(b.id)}">${escape(b.name)}</option>`).join('');
     const systems = state.catalog.systems.map(s => `<option value="${escape(s.id)}">${escape(s.name)}</option>`).join('');
     $('brandFilter').innerHTML = '<option value="all">All brands</option>' + brands; $('hubBrand').innerHTML = '<option value="all">All brands</option>' + brands; $('simBrand').innerHTML = brands;
-    $('hubSystem').innerHTML = '<option value="all">All systems</option>' + systems; $('simSystem').innerHTML = systems;
+    $('hubSystem').innerHTML = '<option value="all">All systems</option>' + systems + '<option value="custom">Custom customer events</option>'; $('simSystem').innerHTML = systems;
     if (view === 'commerce') renderSubscriptions(state.catalog.subscriptions);
     if (view === 'simulator') await configureSimulator({ sourceChanged: true });
     connect();
@@ -256,3 +256,15 @@ $('resetDemo').addEventListener('click', () => {
 window.addEventListener('beforeunload', () => state.stream?.close());
 let resizeTimer; window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (view === 'commerce' && state.data) renderChart(state.data.monthly); }, 120); });
 initialize();
+
+$('customerJSON').addEventListener('input', invalidatePreview);
+$('customerForm').addEventListener('submit', event => {
+  event.preventDefault();
+  perform(event.submitter, async () => {
+    let body; try { body = JSON.parse($('customerJSON').value); } catch { throw new Error('Enter valid customer JSON.'); }
+    const result = await api('/api/simulator/preview', { method: 'POST', body });
+    state.preview = result.event; $('eventPreview').textContent = JSON.stringify(result.event, null, 2);
+    $('previewBadge').textContent = 'Customer'; $('publishStatus').textContent = 'Preview ready. Nothing has been published yet.';
+    $('previewDescription').textContent = 'Customer payload; native JSON types are preserved.'; syncSimulatorButtons();
+  });
+});

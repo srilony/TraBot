@@ -24,7 +24,7 @@ test('workflow HTTP API runs a saved event example through actual builtin GET, c
   const { get, send } = await fixture(t);
   const catalog = await get('/api/workflows/catalog');
   assert.equal(catalog.response.status, 200);
-  assert.equal(catalog.data.eventOptions.length, 9);
+  assert.equal(catalog.data.eventOptions.length, 10);
   assert.equal(catalog.data.capabilities.email.provider, 'resend');
   const example = catalog.data.examples.find(flow => flow.nodes.some(node => node.type === 'event_trigger'));
   assert.ok(example.nodes.some(node => node.type === 'http_get'));
