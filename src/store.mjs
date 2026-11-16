@@ -19,10 +19,14 @@ export function customerPayload(input, { customerEvent = true } = {}) {
 }
 // Credentials belong exclusively to server-side environment bindings.
 export function rejectCredentials(value, env = process.env) {
-  const encoded = JSON.stringify(value);
   const username = env.N8N_BASIC_USERNAME, password = env.N8N_BASIC_PASSWORD;
-  const secrets = [username, password, username && password ? Buffer.from(`${username}:${password}`).toString('base64') : null].filter(Boolean);
+  const secrets = [password, username && password ? Buffer.from(`${username}:${password}`).toString('base64') : null].filter(Boolean);
   const visit = item => {
+    // Usernames can also be public URL/account names. Match them as complete
+    // values, while still rejecting passwords and encoded auth within strings.
+    // Inspect values rather than JSON keys, punctuation or boolean literals.
+    if (typeof item === 'string' && (username && item === username || secrets.some(secret => item.includes(secret))))
+      throw new AppError('Server credentials cannot be stored in application data.');
     if (!item || typeof item !== 'object') return;
     for (const [key, child] of Object.entries(item)) {
       if (/^(password|authorization|username|headers|basicAuth)$/i.test(key)) throw new AppError('Use server credential references; credentials and authentication headers cannot be stored.');
@@ -30,7 +34,6 @@ export function rejectCredentials(value, env = process.env) {
     }
   };
   visit(value);
-  if (secrets.some(secret => encoded.includes(secret))) throw new AppError('Server credentials cannot be stored in application data.');
 }
 export const SYSTEMS = [
   { id: 'erp', name: 'ERP', tables: ['orders'] },

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CommerceStore } from '../src/store.mjs';
+import { CommerceStore, rejectCredentials } from '../src/store.mjs';
 import { WorkflowEngine } from '../src/workflows.mjs';
 import { createWorkflowIO } from '../src/workflow-io.mjs';
 import { createApp } from '../src/server.mjs';
@@ -19,6 +19,26 @@ const definition = () => ({ name: 'Customer CRM integration', enabled: true, nod
     score: { kind: 'path', value: 'nodes.lookup.data.score' }, optional: { kind: 'constant', value: null },
   } } },
 ], edges: [{ id: 'a', source: 'trigger', target: 'lookup', port: 'next' }, { id: 'b', source: 'lookup', target: 'crm', port: 'next' }] });
+
+test('credential guard accepts public account URLs and checks values rather than serialized keys', () => {
+  const env = { N8N_BASIC_USERNAME: 'srilony', N8N_BASIC_PASSWORD: 'strong-private-password' };
+  assert.doesNotThrow(() => rejectCredentials(definition(), env));
+  assert.doesNotThrow(() => rejectCredentials({ enabled: true, nodes: [] }, { N8N_BASIC_USERNAME: 'nodes', N8N_BASIC_PASSWORD: 'true' }));
+  const basic = Buffer.from(`${env.N8N_BASIC_USERNAME}:${env.N8N_BASIC_PASSWORD}`).toString('base64');
+  for (const value of [env.N8N_BASIC_USERNAME, env.N8N_BASIC_PASSWORD, `prefix ${env.N8N_BASIC_PASSWORD}`, `Basic ${basic}`])
+    assert.throws(() => rejectCredentials({ nested: { value } }, env), /Server credentials/);
+});
+
+test('workflows using a public account URL can be saved, tested and enabled', async t => {
+  const original = process.env.N8N_BASIC_USERNAME;
+  process.env.N8N_BASIC_USERNAME = 'srilony';
+  t.after(() => { if (original === undefined) delete process.env.N8N_BASIC_USERNAME; else process.env.N8N_BASIC_USERNAME = original; });
+  const { store, engine } = fixture(t);
+  const draft = engine.save({ ...definition(), enabled: false });
+  store.ingest(payload());
+  assert.equal((await engine.test(draft.id)).status, 'succeeded');
+  assert.equal(engine.save({ ...draft, enabled: true }, draft.id).enabled, true);
+});
 
 function fixture(t, responder = () => new Response('ok', { status: 202 }), filename = ':memory:') {
   const store = new CommerceStore(filename, { seed: false }), calls = [];
