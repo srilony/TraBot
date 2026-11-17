@@ -117,3 +117,21 @@ Custom customer JSON can be previewed in the simulator and published to the even
 See [workflow setup and use](docs/WORKFLOWS.md), [scope and assumptions](docs/PROTOTYPE_SCOPE.md) and [investor walkthrough](docs/DEMO_GUIDE.md).
 
 The cloud onboarding interface has no public app preview. No public hosting deployment has been performed. A hosted demo needs a Node 24 host with persistent disk and SSE support (one process), plus access controls before exposing its unauthenticated write/reset APIs publicly. Publishing the cloud environment saves files/configuration, not running server processes.
+
+### Language and presentation
+
+All four views offer a language selector at the top right. The default is Dutch
+(`nl-NL`); English uses UK conventions (`en-GB`). The choice is stored in the
+browser and applies across navigation. Switching language keeps current form
+inputs, filters, workflow edits, and event previews.
+
+`public/messages.js` contains Dutch UI translations for the English source
+messages. `public/i18n.js` localises presentation text and accessibility labels,
+including dynamically rendered views, and provides shared `Intl` formatters.
+Numbers, EUR amounts, chart months, relative times, and display dates use the
+selected locale. Reporting timestamps remain explicitly UTC. Native numeric and
+date form controls retain machine-readable values; event JSON, identifiers,
+credentials, user-authored workflow names, and email content stay intact.
+
+`public/theme.css` applies the Konnect-inspired aubergine, blush, and lilac theme
+across the dashboard, event journal, simulator, and workflow editor.

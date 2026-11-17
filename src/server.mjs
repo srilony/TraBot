@@ -8,6 +8,9 @@ import { createWorkflowIO } from './workflow-io.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const FILES = {
+  '/i18n.js': ['i18n.js', 'text/javascript; charset=utf-8'],
+  '/messages.js': ['messages.js', 'text/javascript; charset=utf-8'],
+  '/theme.css': ['theme.css', 'text/css; charset=utf-8'],
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/event-hub': ['index.html', 'text/html; charset=utf-8'],
   '/simulator': ['index.html', 'text/html; charset=utf-8'],

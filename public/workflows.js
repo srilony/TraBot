@@ -21,7 +21,7 @@ async function api(path,{method='GET',body}={}){
   if(!response.ok){const error=new Error(data.error||`Request failed (${response.status}).`);error.details=data.details;throw error;}
   return data;
 }
-function dateText(value){if(!value)return'—';const d=new Date(value);return Number.isFinite(d.getTime())?new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'medium'}).format(d):'—';}
+function dateText(value){if(!value)return'—';const d=new Date(value);return Number.isFinite(d.getTime())?I18n.date(value):'—';}
 function localInput(value){const date=new Date(value);if(!Number.isFinite(date.getTime()))return'';const local=new Date(date.getTime()-date.getTimezoneOffset()*60000);return local.toISOString().slice(0,19);}
 function trigger(){return state.flow.nodes.find(n=>n.type==='event_trigger'||n.type==='schedule_trigger');}
 function nodeById(id){return state.flow.nodes.find(n=>n.id===id);}
@@ -31,7 +31,7 @@ function setBusy(value){state.busy=value;['saveWorkflow','toggleWorkflow','testW
 async function perform(action){if(state.busy)return;setBusy(true);try{return await action();}catch(error){notify(error.message,true);if(error.details)renderValidation({valid:false,errors:Array.isArray(error.details)?error.details:[{message:String(error.details)}]});}finally{setBusy(false);}}
 function guardDiscard(){return !state.dirty||confirm('Discard unsaved workflow changes?');}
 function refreshPicker(){
-  $('workflowSelect').innerHTML='<option value="">Unsaved workflow</option>'+state.workflows.map(f=>`<option value="${escape(f.id)}">${escape(f.name)}${f.enabled?' · Enabled':''}</option>`).join('');
+  $('workflowSelect').innerHTML='<option value="">Unsaved workflow</option>'+state.workflows.map(f=>`<option data-no-i18n value="${escape(f.id)}">${escape(f.name)}${f.enabled?' · '+I18n.text('Enabled'):''}</option>`).join('');
   $('workflowSelect').value=state.flow.id||'';
 }
 function updateToolbar(){
@@ -110,7 +110,7 @@ function connectNodes(target){
   candidate.push({id:`edge-${crypto.randomUUID().slice(0,8)}`,source:connection.source,target,port:connection.port});state.flow.edges=candidate;state.connection=null;state.pointer=null;setDirty();renderCanvas();$('canvasHelp').textContent='Connection added. Each input and output branch connects to one block.';
 }
 function stagePoint(event){const box=$('canvasStage').getBoundingClientRect();return{x:(event.clientX-box.left)/state.zoom,y:(event.clientY-box.top)/state.zoom};}
-function setZoom(value){state.zoom=Math.max(.35,Math.min(1.5,value));$('canvasStage').style.transform=`scale(${state.zoom})`;$('canvasSpace').style.width=`${SIZE.stageWidth*state.zoom}px`;$('canvasSpace').style.height=`${SIZE.stageHeight*state.zoom}px`;$('zoomValue').textContent=`${Math.round(state.zoom*100)}%`;}
+function setZoom(value){state.zoom=Math.max(.35,Math.min(1.5,value));$('canvasStage').style.transform=`scale(${state.zoom})`;$('canvasSpace').style.width=`${SIZE.stageWidth*state.zoom}px`;$('canvasSpace').style.height=`${SIZE.stageHeight*state.zoom}px`;$('zoomValue').textContent=I18n.number(state.zoom,{style:'percent',maximumFractionDigits:0});}
 function fitCanvas(){const nodes=state.flow.nodes;if(!nodes.length){setZoom(1);return;}const minX=Math.min(...nodes.map(n=>n.position.x)),maxX=Math.max(...nodes.map(n=>n.position.x+SIZE.width));const minY=Math.min(...nodes.map(n=>n.position.y)),maxY=Math.max(...nodes.map(n=>n.position.y+(n.type==='condition'?155:128)));const viewport=$('canvasViewport');setZoom(Math.min(1,(viewport.clientWidth-65)/(maxX-minX),(viewport.clientHeight-70)/(maxY-minY)));viewport.scrollLeft=Math.max(0,minX*state.zoom-30);viewport.scrollTop=Math.max(0,minY*state.zoom-35);}
 function removeEdge(id){state.flow.edges=state.flow.edges.filter(e=>e.id!==id);if(state.edge===id)state.edge=null;setDirty();renderCanvas();}
 function variablePaths(){const paths=new Set([...(state.catalog?.variablePaths||FALLBACK_PATHS),...FALLBACK_PATHS]);const t=trigger();(t?.config.fields||[]).forEach(f=>{if(f.key)paths.add('vars.'+f.key);});state.flow.nodes.filter(n=>n.type==='http_get').forEach(n=>['status','data','data.limitCents','data.teamEmail','data.currency','data.brandId'].forEach(path=>paths.add(`nodes.${n.id}.${path}`)));return[...paths];}
@@ -181,7 +181,7 @@ $('nodeInspector').addEventListener('input',event=>{
   }
 });
 $('nodeInspector').addEventListener('change',event=>{
-  if(event.target.id==='wfCrmFields'){try{const fields=JSON.parse(event.target.value);if(!fields||Array.isArray(fields)||typeof fields!=='object')throw new Error();nodeById(state.selected).config.fields=fields;event.target.setCustomValidity('');configChanged(nodeById(state.selected));}catch{event.target.setCustomValidity('Enter a JSON object of field mappings.');event.target.reportValidity();}return;}
+  if(event.target.id==='wfCrmFields'){try{const fields=JSON.parse(event.target.value);if(!fields||Array.isArray(fields)||typeof fields!=='object')throw new Error();nodeById(state.selected).config.fields=fields;event.target.setCustomValidity('');configChanged(nodeById(state.selected));}catch{event.target.setCustomValidity(I18n.text('Enter a JSON object of field mappings.'));event.target.reportValidity();}return;}
   const input=event.target,node=nodeById(state.selected);if(!node)return;
   if(input.dataset.match!==undefined){node.config.matches=[...$('nodeInspector').querySelectorAll('[data-match]:checked')].map(el=>{const source=state.catalog.eventOptions[Number(el.dataset.match)];return{systemId:source.systemId,table:source.table,op:source.op};});configChanged(node);}
   else if(input.dataset.operand&&input.dataset.part==='kind'){
@@ -208,13 +208,13 @@ function setTab(tab){state.tab=tab;['builder','runs','outbox'].forEach(value=>{$
 async function refreshRuns(){
   if(!state.flow.id){$('runList').innerHTML='<p class="empty-state">Save a workflow, then test it or enable its trigger.</p>';$('runsCount').textContent='';return;}
   const id=state.flow.id,epoch=state.refreshEpoch;
-  try{const result=await api(`/api/workflows/${encodeURIComponent(id)}/runs`);if(state.flow.id!==id||epoch!==state.refreshEpoch)return;state.runs=result.runs||[];$('runsCount').textContent=state.runs.length||'';
+  try{const result=await api(`/api/workflows/${encodeURIComponent(id)}/runs`);if(state.flow.id!==id||epoch!==state.refreshEpoch)return;state.runs=result.runs||[];$('runsCount').textContent=state.runs.length?I18n.number(state.runs.length):'';
     $('runList').innerHTML=state.runs.length?`<div class="table-scroll"><table class="wf-data-table"><thead><tr><th>Started</th><th>Status</th><th>Trigger</th><th>Mode</th><th>Detail</th></tr></thead><tbody>${state.runs.map(run=>`<tr><td>${escape(dateText(run.startedAt||run.createdAt))}<code>${escape(run.id)}</code></td><td><span class="wf-run-status ${escape(run.status)}">${escape(run.status)}</span></td><td>${escape(run.triggerType||'manual')}</td><td>${run.mode==='test'?'Test · CRM sends real POST':'Live'}</td><td><button class="wf-text-button" type="button" data-run="${escape(run.id)}">Inspect run →</button></td></tr>`).join('')}</tbody></table></div>`:'<p class="empty-state">No runs yet.<br>Use Test flow, or enable this workflow and publish a matching event.</p>';
     if($('runDialog').open&&state.openRunId){const run=state.runs.find(r=>r.id===state.openRunId);if(run)renderRun(run,false);}
   }catch(error){$('runList').innerHTML=`<p class="wf-unavailable">${escape(error.message)}</p>`;}
 }
 async function refreshOutbox(){
-  try{const result=await api('/api/workflows/outbox');state.messages=result.messages||[];$('outboxCount').textContent=state.messages.length||'';
+  try{const result=await api('/api/workflows/outbox');state.messages=result.messages||[];$('outboxCount').textContent=state.messages.length?I18n.number(state.messages.length):'';
     $('outboxList').innerHTML=state.messages.length?`<div class="table-scroll"><table class="wf-data-table"><thead><tr><th>Created</th><th>Recipient / subject</th><th>Delivery</th><th>Status</th><th>Detail</th></tr></thead><tbody>${state.messages.map(raw=>{const message=messageData(raw);return`<tr><td>${escape(dateText(message.createdAt))}<code>${escape(message.nodeId)}</code></td><td>${escape(message.to)}<code>${escape(message.subject)}</code></td><td>${message.delivery==='outbox'?'Demo outbox':'Resend'}</td><td><span class="wf-run-status ${escape(message.status)}">${escape(message.status)}</span></td><td><button class="wf-text-button" type="button" data-message="${escape(message.id)}">Inspect email →</button></td></tr>`;}).join('')}</tbody></table></div>`:'<p class="empty-state">No email actions yet.<br>Run a test flow to inspect its rendered message here.</p>';
   }catch(error){$('outboxList').innerHTML=`<p class="wf-unavailable">${escape(error.message)}</p>`;}
 }
@@ -299,3 +299,5 @@ async function initialize(){
 }
 setInterval(()=>{if(document.hidden)return;if(state.tab==='runs'||$('runDialog').open)refreshRuns();if(state.tab==='outbox')refreshOutbox();},3000);
 initialize();
+
+document.addEventListener('localechange', () => { updateToolbar(); setZoom(state.zoom); if(state.tab==='runs')refreshRuns(); if(state.tab==='outbox')refreshOutbox(); if($('runDialog').open){const run=state.runs.find(r=>r.id===state.openRunId);if(run)renderRun(run,false);} });

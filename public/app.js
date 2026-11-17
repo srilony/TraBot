@@ -2,8 +2,8 @@
 const $ = id => document.getElementById(id);
 const view = location.pathname.replace(/\/$/, '') === '/event-hub' ? 'hub' : location.pathname.replace(/\/$/, '') === '/simulator' ? 'simulator' : 'commerce';
 const state = { catalog: null, data: null, hub: null, stream: null, epoch: 0, brandId: 'all', offset: 0, limit: 25, preview: null, records: [], recordsEpoch: 0, dirty: false, busy: false, toastTimer: null, rules: [] };
-const money = (cents, digits = 2) => new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR', maximumFractionDigits: digits, minimumFractionDigits: digits }).format((Number(cents) || 0) / 100);
-const count = value => new Intl.NumberFormat('en-IE').format(Number(value) || 0);
+const money = (cents, digits = 2) => new Intl.NumberFormat(I18n.locale, { style: 'currency', currency: 'EUR', maximumFractionDigits: digits, minimumFractionDigits: digits }).format((Number(cents) || 0) / 100);
+const count = value => new Intl.NumberFormat(I18n.locale).format(Number(value) || 0);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const safeColor = color => /^#[0-9a-f]{6}$/i.test(color || '') ? color : '#426d62';
 const opName = op => ({ c: 'Create', u: 'Update', d: 'Delete' }[op] || op);
@@ -13,7 +13,7 @@ const tableName = table => table === 'orders' ? 'Orders' : table === 'carts' ? '
 const ruleKey = rule => `${rule.systemId}.${rule.table}`;
 const timestamp = value => {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 23)}` : '—';
+  return Number.isFinite(date.getTime()) ? I18n.date(value) : '—';
 };
 const recordId = event => event.data?.[event.idField] ?? (event.after?.orderId || event.after?.cartId || event.before?.orderId || event.before?.cartId || event.payload?.orderId || event.payload?.cartId || '—');
 function notify(message, error = false) {
@@ -46,25 +46,22 @@ function applyColors() {
 function brandAvatar(brand, small = false) {
   return `<span class="brand-avatar${small ? ' small' : ''}" data-avatar-color="${safeColor(brand?.color)}">${escape(brand?.initials || '?')}</span>`;
 }
-function relativeTime(value) {
-  const seconds = Math.max(0, Math.floor((new Date(state.data?.asOf || Date.now()) - new Date(value)) / 1000));
-  if (!Number.isFinite(seconds)) return 'Unknown time';
-  return seconds < 60 ? 'Just now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h ago` : `${Math.floor(seconds / 86400)}d ago`;
-}
+function relativeTime(value) { return I18n.relative(value, state.data?.asOf || Date.now()); }
+
 function renderChart(monthly) {
   const width = Math.max(300, $('revenueChart').clientWidth || 600), height = 220, left = 49, right = 25, top = 21, bottom = 35;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const max = Math.max(...monthly.map((m) => m.grossOrderValueCents), 10000) * 1.15;
   const points = monthly.map((month, index) => ({ x: left + (monthly.length <= 1 ? plotWidth / 2 : index * plotWidth / (monthly.length - 1)), y: top + plotHeight * (1 - month.grossOrderValueCents / max), ...month }));
-  const axisMoney = (value) => value >= 100000 ? `€${(value / 100000).toFixed(value >= 1000000 ? 0 : 1).replace(/\.0$/, '')}k` : money(value, 0);
+  const axisMoney = (value) => I18n.number(value / 100, { style: 'currency', currency: 'EUR', notation: 'compact', maximumFractionDigits: 1 });
   const grid = [0, 1, 2, 3, 4].map((tick) => {
     const y = top + plotHeight * tick / 4;
     return `<line class="chart-grid-line" x1="${left}" x2="${width - right}" y1="${y}" y2="${y}"/><text class="chart-axis" text-anchor="end" x="${left - 11}" y="${y + 3}">${axisMoney(max * (1 - tick / 4))}</text>`;
   }).join('');
   const line = points.map((point, index) => `${index ? 'L' : 'M'}${point.x},${point.y}`).join(' ');
   const area = points.length ? `${line} L${points.at(-1).x},${top + plotHeight} L${points[0].x},${top + plotHeight} Z` : '';
-  $('revenueChart').innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chartTitle chartDescription"><title id="chartTitle">Monthly gross order value</title><desc id="chartDescription">${escape(monthly.map((month) => `${month.label}: ${money(month.grossOrderValueCents, 2)} from ${count(month.orderCount)} orders`).join('. '))}. Values are booked sales, not collected cash.</desc><defs><linearGradient id="revenueFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#739a7c" stop-opacity=".18"/><stop offset="100%" stop-color="#739a7c" stop-opacity=".015"/></linearGradient></defs>${grid}<path d="${area}" fill="url(#revenueFill)"/><path class="chart-line" d="${line}"/>${points.map((point) => `<circle class="chart-point" cx="${point.x}" cy="${point.y}" r="3.5"><title>${escape(point.label)}: ${money(point.grossOrderValueCents, 2)} · ${count(point.orderCount)} orders</title></circle><text class="chart-axis" text-anchor="middle" x="${point.x}" y="${height - 10}">${escape(point.label)}</text>`).join('')}</svg>`;
-  $('monthlyTable').innerHTML = monthly.map((month) => `<tr><th scope="row">${escape(month.month)}</th><td>${count(month.orderCount)}</td><td>${money(month.grossOrderValueCents, 2)}</td></tr>`).join('');
+  $('revenueChart').innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chartTitle chartDescription"><title id="chartTitle">Monthly gross order value</title><desc id="chartDescription">${escape(monthly.map((month) => `${month.label}: ${money(month.grossOrderValueCents, 2)} · ${count(month.orderCount)} ${I18n.text('Orders')}`).join('. '))}. ${I18n.text('Values are booked sales, not collected cash.')}</desc><defs><linearGradient id="revenueFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#7f53f9" stop-opacity=".18"/><stop offset="100%" stop-color="#7f53f9" stop-opacity=".015"/></linearGradient></defs>${grid}<path d="${area}" fill="url(#revenueFill)"/><path class="chart-line" d="${line}"/>${points.map((point) => `<circle class="chart-point" cx="${point.x}" cy="${point.y}" r="3.5"><title>${escape(point.label)}: ${money(point.grossOrderValueCents, 2)} · ${count(point.orderCount)} ${I18n.text('Orders')}</title></circle><text class="chart-axis" text-anchor="middle" x="${point.x}" y="${height - 10}">${escape(point.label)}</text>`).join('')}</svg>`;
+  $('monthlyTable').innerHTML = monthly.map((month) => `<tr><th scope="row">${escape(new Intl.DateTimeFormat(I18n.locale, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(month.month + '-01T00:00:00Z')))}</th><td>${count(month.orderCount)}</td><td>${money(month.grossOrderValueCents, 2)}</td></tr>`).join('');
 }
 
 function renderSubscriptions(rules) {
@@ -94,7 +91,7 @@ function renderCommerce(data) {
   $('opportunityTotal').textContent = money(summary.openCartValueCents);
   $('opportunitySubtitle').textContent = `${count(summary.openCartCount)} unconverted carts awaiting action`;
   $('brandsCount').textContent = `${data.brandPerformance.length} brand${data.brandPerformance.length === 1 ? '' : 's'}`;
-  renderChart(data.monthly);
+  renderChart(data.monthly.map(month => ({ ...month, label: new Intl.DateTimeFormat(I18n.locale, { month: 'short', timeZone: 'UTC' }).format(new Date(month.month + '-01T00:00:00Z')) })));
   const max = Math.max(...data.brandPerformance.map(b => b.openCartValueCents), 1);
   $('opportunityBars').innerHTML = data.brandPerformance.map(b => `<div><div class="bar-heading"><span class="bar-brand"><i class="brand-dot" data-bar-color="${safeColor(b.color)}"></i>${escape(b.name)}</span><span class="bar-amount">${money(b.openCartValueCents)}</span></div><div class="bar-track" role="img" aria-label="${escape(b.name)}: ${money(b.openCartValueCents)} opportunity"><div class="bar-fill" data-bar-color="${safeColor(b.color)}" data-fill="${b.openCartValueCents / max * 100}"></div></div></div>`).join('');
   $('brandTable').innerHTML = data.brandPerformance.map(b => `<tr><th scope="row"><span class="brand-cell">${brandAvatar(b)}<span><strong>${escape(b.name)}</strong><span class="category">${escape(b.category)}</span></span></span></th><td>${money(b.grossOrderValueCents)}</td><td>${count(b.orderCount)}</td><td>${money(b.openCartValueCents)} <span class="column-note">${count(b.openCartCount)} carts</span></td></tr>`).join('');
@@ -268,3 +265,6 @@ $('customerForm').addEventListener('submit', event => {
     $('previewDescription').textContent = 'Customer payload; native JSON types are preserved.'; syncSimulatorButtons();
   });
 });
+
+// Reformat cached data without discarding filters, previews or unsaved subscriptions.
+document.addEventListener('localechange', () => { if (state.data) renderCommerce(state.data); if (state.hub) renderHub(state.hub); if (!state.data && !state.hub) updated(); if ($('eventDialog').open) { const event = (state.hub?.events || state.data?.recentEvents || []).find(e => String(recordId(e)) === $('eventDialogTitle').textContent.split(' · ').at(-1)); if (event) inspectEvent(event); } if (state.records.length) { const selected = $('simExisting').value; $('simExisting').innerHTML = state.records.map(r => `<option value="${escape(r.recordId)}">${escape(r.recordId)} · ${money(r.data.amountCents)} · ${escape(r.data.status)}</option>`).join(''); $('simExisting').value = selected; } });
