@@ -192,7 +192,17 @@ export class WorkflowEngine {
   }
   list() { return { workflows: this.db.prepare('SELECT id FROM workflow_definitions ORDER BY updated_at DESC,id').all().map(row => this.get(row.id)) }; }
   save(input, requestedId) {
-    rejectCredentials(input);
+    // The server-bound URL is public configuration and can coincidentally contain
+    // a credential substring. Exempt only this exact URL in CRM URL fields;
+    // every other field still receives the full credential check.
+    const checked = isObject(input) ? clone(input) : input;
+    const boundURL = this.io.capabilities().crm?.url;
+    if (boundURL && Array.isArray(checked?.nodes)) {
+      for (const node of checked.nodes) {
+        if (node?.type === 'update_crm' && node.config?.url === boundURL) node.config.url = null;
+      }
+    }
+    rejectCredentials(checked);
     if (!isObject(input) || JSON.stringify(input).length > 128000 || !Array.isArray(input.nodes) || !Array.isArray(input.edges) || input.nodes.length > 25 || input.edges.length > 50)
       throw new AppError('A workflow needs arrays of at most 25 nodes and 50 edges.');
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 100) throw new AppError('Give the workflow a name of at most 100 characters.');

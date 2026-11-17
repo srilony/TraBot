@@ -135,3 +135,25 @@ test('invalid CRM bindings never expose URL credentials and missing input stops 
   const saved = engine.save(flow); store.ingest(payload()); engine.receiveEvents(); await engine.drain();
   assert.match(engine.runs(saved.id).runs[0].error, /Variable is unavailable/); assert.equal(calls.length, 0);
 });
+
+test('bound CRM URL may contain a credential substring without exempting other application data', t => {
+  const previous = process.env.N8N_BASIC_USERNAME;
+  process.env.N8N_BASIC_USERNAME = 'srilony';
+  t.after(() => {
+    if (previous === undefined) delete process.env.N8N_BASIC_USERNAME;
+    else process.env.N8N_BASIC_USERNAME = previous;
+  });
+  const { engine, store } = fixture(t);
+  const flow = definition();
+  assert.ok(engine.save(flow).id);
+  const named = definition(); named.name = 'srilony';
+  assert.throws(() => engine.save(named), /Server credentials/);
+  const mapped = definition(); mapped.nodes[2].config.fields.name.value = 'srilony';
+  assert.throws(() => engine.save(mapped), /Server credentials/);
+  const unbound = definition(); unbound.nodes[2].config.url = 'https://srilony.example.org/webhook';
+  assert.throws(() => engine.save(unbound), /Server credentials/);
+  const embedded = definition(); embedded.nodes[2].config.url = 'https://user:srilony@example.org/webhook';
+  assert.throws(() => engine.save(embedded), /Server credentials/);
+  const customer = payload(); customer.data.name = 'srilony';
+  assert.throws(() => store.ingest(customer), /Server credentials/);
+});
